@@ -1,0 +1,263 @@
+:root {
+  --bg: #1e1e1e;
+  --bg-sidebar: #252526;
+  --bg-toolbar: #2d2d2d;
+  --border: #3c3c3c;
+  --text: #d4d4d4;
+  --text-dim: #8a8a8a;
+  --accent: #007acc;
+  --accent-hover: #1a8cd8;
+  --ok: #4caf50;
+  --error: #f44336;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+  margin: 0;
+  font-family: -apple-system, "Segoe UI", "Hiragino Kaku Gothic ProN", Meiryo, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.app {
+  display: flex;
+  height: 100vh;
+}
+
+.sidebar {
+  width: 260px;
+  flex-shrink: 0;
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  padding: 12px 0;
+}
+
+.sidebar h1 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+  padding: 0 16px 8px;
+  margin: 0;
+}
+
+.file-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.file-list li {
+  padding: 6px 16px;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.file-list li:hover {
+  background: #2a2d2e;
+}
+
+.file-list li.active {
+  background: #37373d;
+  color: #fff;
+}
+
+.file-list li.loading,
+.file-list li.empty {
+  color: var(--text-dim);
+  cursor: default;
+}
+
+.file-list li.loading:hover,
+.file-list li.empty:hover {
+  background: none;
+}
+
+.file-icon {
+  font-size: 10px;
+  font-weight: bold;
+  width: 16px;
+  text-align: center;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.file-icon.rb { background: #701516; color: #fff; }
+.file-icon.c, .file-icon.h { background: #283593; color: #fff; }
+
+.editor-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  background: var(--bg-toolbar);
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+
+.current-file {
+  flex: 1;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+button {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  padding: 6px 14px;
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+button:disabled {
+  background: #555;
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.status {
+  min-width: 90px;
+  font-size: 12px;
+}
+
+.status.ok { color: var(--ok); }
+.status.error { color: var(--error); }
+
+.editor-wrapper {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.line-numbers {
+  width: 48px;
+  flex-shrink: 0;
+  overflow: hidden;
+  background: #1a1a1a;
+  border-right: 1px solid var(--border);
+  text-align: right;
+  padding: 12px 8px 12px 0;
+  color: var(--text-dim);
+  user-select: none;
+}
+
+.line-numbers,
+.highlight-layer,
+#editor {
+  font-family: "SF Mono", Menlo, Consolas, "Courier New", monospace;
+  font-size: 14px;
+  line-height: 1.6;
+  tab-size: 2;
+  letter-spacing: normal;
+  word-spacing: normal;
+}
+
+.editor-scroll-area {
+  position: relative;
+  flex: 1;
+  overflow: auto;
+  /*
+    highlight-layer(<pre>)と#editor(<textarea>)を同じグリッドセルに重ねる。
+    どちらも grid-area:1/1 を指定し、align-items:stretch(初期値)で
+    お互いが常に同じ高さ・同じ位置になるようにする。
+
+    以前は position:absolute で重ねていたが、<textarea> は内容が
+    あふれると要素内部で独自にスクロールする性質を持つため、
+    親のスクロールとテキストエリア自身のスクロールがズレて
+    「表示されている文字列とキャレットの行が合わない」問題が起きていた。
+    Gridで重ねてスクロールをこのコンテナ一箇所に集約することで解消する。
+  */
+  display: grid;
+}
+
+.highlight-layer,
+#editor {
+  grid-area: 1 / 1;
+  width: 100%;
+  min-height: 100%;
+  margin: 0;
+  padding: 12px;
+  border: 0;
+  white-space: pre;
+  overflow-wrap: normal;
+  word-break: normal;
+  box-sizing: border-box;
+}
+
+.highlight-layer {
+  pointer-events: none;
+  color: var(--text);
+  background: none;
+  overflow: hidden; /* <pre>のデフォルトoverflow:autoを無効化し、独自スクロールを防ぐ */
+}
+
+.highlight-layer code {
+  margin: 0;
+  padding: 0;
+  background: none;
+  font: inherit;
+  white-space: inherit;
+}
+
+#editor {
+  background: transparent;
+  color: transparent;
+  caret-color: #fff;
+  resize: none;
+  outline: none;
+  overflow: hidden; /* textarea自身の内部スクロールを無効化し、親のスクロールに一本化 */
+  z-index: 1;
+}
+
+#editor::placeholder {
+  color: var(--text-dim);
+}
+
+#editor:disabled {
+  cursor: default;
+}
+
+/* Prismのトークンカラー(one-dark寄りのシンプルな配色) */
+.token.comment { color: #6a9955; font-style: italic; }
+.token.string,
+.token.char { color: #ce9178; }
+.token.number,
+.token.boolean { color: #b5cea8; }
+.token.keyword,
+.token.builtin { color: #c586c0; }
+.token.function { color: #dcdcaa; }
+.token.class-name { color: #4ec9b0; }
+.token.symbol,
+.token.variable { color: #9cdcfe; }
+.token.operator,
+.token.punctuation { color: #d4d4d4; }
+.token.regex { color: #d16969; }
+.token.property,
+.token.macro { color: #569cd6; }

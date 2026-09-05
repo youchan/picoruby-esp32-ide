@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>Prism.js + Sinatra Editor</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <h1>Project Files</h1>
+      <ul id="file-list" class="file-list">
+        <li class="loading">読み込み中...</li>
+      </ul>
+    </aside>
+
+    <main class="editor-area">
+      <div class="toolbar">
+        <span id="current-file" class="current-file">ファイルを選択してください</span>
+        <button id="save-btn" disabled>保存 (Ctrl/Cmd + S)</button>
+        <span id="status" class="status"></span>
+      </div>
+
+      <div id="editor-wrapper" class="editor-wrapper">
+        <div id="line-numbers" class="line-numbers">
+          <div id="line-numbers-inner"></div>
+        </div>
+        <div class="editor-scroll-area">
+          <pre id="highlight-layer" class="highlight-layer"><code id="highlight-content"></code></pre>
+          <textarea id="editor" wrap="off" spellcheck="false"
+            placeholder="ファイルを選択してください"></textarea>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!--
+    CodeMirror 6をesm.sh(CDN)経由のESMで読み込んでいた際、パッケージ間のバージョン解決が
+    ずれて "does not provide an export named ..." のような読み込みエラーが発生した。
+    Prism.jsは<script>タグでの読み込みが標準かつ安定しているため、こちらの方式に切り替える。
+    バージョンを固定したcdnjs URLを直接指定し、ビルドステップも不要にする。
+  -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.30.0/components/prism-core.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.30.0/components/prism-clike.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.30.0/components/prism-c.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.30.0/components/prism-ruby.min.js"></script>
+
+  <script src="/js/editor.js"></script>
+</body>
+</html>

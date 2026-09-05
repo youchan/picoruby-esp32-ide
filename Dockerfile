@@ -1,4 +1,4 @@
-FROM espressif/idf:latest
+FROM espressif/idf:v5.5.1
 
 SHELL ["/bin/bash", "-c"]
 
@@ -20,6 +20,7 @@ RUN rbenv init
 RUN rbenv install 4.0.5
 RUN rbenv global 4.0.5
 RUN gem install rake
+RUN gem install webrick
 
 COPY R2P2-ESP32/ ./R2P2-ESP32
 
@@ -27,10 +28,10 @@ WORKDIR R2P2-ESP32
 RUN . "${IDF_PATH}/export.sh" && rake setup_esp32
 # RUN . "${IDF_PATH}/export.sh" && rake build
 
+WORKDIR /root
+
 COPY R2P2-ESP32-installer/ .
 
-WORKDIR R2P2-ESP32 /root
-
-CMD ["python3", "-m", "http.server", "8080"]
+CMD ["ruby", "-run", "-e", "httpd"]
 
 
