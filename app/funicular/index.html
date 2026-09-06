@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PicoRuby Editor (Funicular)</title>
+
+  <!-- スタイルは app/public/css/style.css をそのまま流用する -->
+  <link rel="stylesheet" href="/css/style.css">
+
+  <!--
+    Prism.js (シンタックスハイライト)
+    CDNのESM importはバージョン解決が不安定なので、
+    バージョン固定の <script> タグで読み込む方針。
+  -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.30.0/components/prism-core.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.30.0/components/prism-clike.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.30.0/components/prism-c.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.30.0/components/prism-ruby.min.js"></script>
+
+  <!--
+    Ruby(Funicular)側から呼ぶための薄いJSラッパ。
+    Prismの細かい作法(文法オブジェクトの取り出し、末尾改行の補正)はここに閉じ込めて、
+    Ruby側は funicularHighlight(code, lang) だけ知っていればよい状態にする。
+  -->
+  <script>
+    window.funicularHighlight = function (code, lang) {
+      var grammar = Prism.languages[lang] || Prism.languages.clike;
+      // 末尾が改行だと最終行の高さが潰れてキャレットとズレるため空白を足す
+      var source = /\n$/.test(code) ? code + ' ' : code;
+      return Prism.highlight(source, grammar, lang);
+    };
+  </script>
+</head>
+<body>
+  <div id="app"><!-- Funicular がここにマウントされる --></div>
+
+  <!--
+    Ruby ソースは読み込み順がそのまま依存順になる。
+    子コンポーネント → ルートコンポーネント → 起動 の順に並べること。
+  -->
+  <script type="text/ruby" src="/ruby/components/file_list.rb"></script>
+  <script type="text/ruby" src="/ruby/components/toolbar.rb"></script>
+  <script type="text/ruby" src="/ruby/components/editor_app.rb"></script>
+  <script type="text/ruby" src="/ruby/main.rb"></script>
+
+  <!--
+    PicoRuby.wasm 本体。Funicular は同梱されている。
+    text/ruby スクリプトを走査する側なので、必ず最後に置く。
+  -->
+  <script src="https://cdn.jsdelivr.net/npm/@picoruby/wasm-wasi@4.0.2/dist/init.iife.js"></script>
+</body>
+</html>

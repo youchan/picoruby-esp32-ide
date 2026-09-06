@@ -96,6 +96,13 @@ html, body {
 .file-icon.rb { background: #701516; color: #fff; }
 .file-icon.c, .file-icon.h { background: #283593; color: #fff; }
 
+/* Funicular版はファイル名を <span> で描画するので、省略表示は子側に持たせる */
+.file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .editor-area {
   flex: 1;
   display: flex;

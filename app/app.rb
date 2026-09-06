@@ -5,7 +5,10 @@ set :public_folder, File.join(__dir__, "public")
 set :views, File.join(__dir__, "views")
 
 # 編集対象として公開するプロジェクトのルートディレクトリ
-PROJECT_ROOT = File.expand_path("project", __dir__)
+PROJECT_ROOT = File.expand_path("../project", __dir__)
+
+# Funicular(PicoRuby.wasm)版フロントエンドの置き場所
+FUNICULAR_ROOT = File.expand_path("funicular", __dir__)
 
 # 編集を許可する拡張子(Ruby / C)
 ALLOWED_EXTENSIONS = %w[.rb .c .h].freeze
@@ -26,8 +29,27 @@ helpers do
   end
 end
 
-# エディタ画面
+# エディタ画面(Funicular / PicoRuby.wasm 版)
 get "/" do
+  send_file File.join(FUNICULAR_ROOT, "index.html")
+end
+
+# Funicular アプリの Ruby ソース。
+# <script type="text/ruby" src="/ruby/..."> から読み込まれる。
+get %r{/ruby/(.+\.rb)} do |rel|
+  full = File.expand_path(File.join(FUNICULAR_ROOT, "ruby", rel))
+  root_with_sep = File.join(FUNICULAR_ROOT, "ruby") + File::SEPARATOR
+
+  json_error(400, "invalid path") unless full.start_with?(root_with_sep)
+  halt 404 unless File.file?(full)
+
+  content_type "text/plain", charset: "utf-8"
+  File.read(full)
+end
+
+# 旧エディタ画面(textarea + Prism を素の JavaScript で書いた版)。
+# Funicular 版と挙動を比較したいとき用に残してある。
+get "/legacy" do
   erb :index
 end
 

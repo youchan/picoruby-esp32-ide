@@ -17,21 +17,21 @@ RUN git clone https://github.com/rbenv/rbenv.git "${RBENV_ROOT}"
 RUN git clone https://github.com/rbenv/ruby-build.git "$(rbenv root)"/plugins/ruby-build
 RUN rbenv init
 
-RUN rbenv install 4.0.5
-RUN rbenv global 4.0.5
+RUN rbenv install 4.0.6
+RUN rbenv global 4.0.6
 RUN gem install rake
 RUN gem install webrick
 
-COPY R2P2-ESP32/ ./R2P2-ESP32
+COPY R2P2-ESP32/ /R2P2-ESP32
 
-WORKDIR R2P2-ESP32
+WORKDIR /R2P2-ESP32
 RUN . "${IDF_PATH}/export.sh" && rake setup_esp32
 # RUN . "${IDF_PATH}/export.sh" && rake build
 
 WORKDIR /root
 
-COPY R2P2-ESP32-installer/ .
+COPY app/ .
 
-CMD ["ruby", "-run", "-e", "httpd"]
+CMD ["ruby", "app.rb"]
 
 
