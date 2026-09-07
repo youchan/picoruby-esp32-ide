@@ -19,19 +19,23 @@ RUN rbenv init
 
 RUN rbenv install 4.0.6
 RUN rbenv global 4.0.6
-RUN gem install rake
-RUN gem install webrick
 
 COPY R2P2-ESP32/ /R2P2-ESP32
 
 WORKDIR /R2P2-ESP32
 RUN . "${IDF_PATH}/export.sh" && rake setup_esp32
-# RUN . "${IDF_PATH}/export.sh" && rake build
 
 WORKDIR /root
 
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+
+COPY Gemfile Gemfile.lock ./
+RUN bundle install
+
 COPY app/ .
+COPY project/ /project
 
-CMD ["ruby", "app.rb"]
+EXPOSE 4567
 
-
+CMD ["ruby", "app.rb", "-o", "0.0.0.0"]
