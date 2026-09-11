@@ -34,7 +34,7 @@ COPY Gemfile Gemfile.lock ./
 RUN bundle install
 
 COPY app/ .
-COPY project/ /project
+COPY projects/ /projects
 
 EXPOSE 4567
 

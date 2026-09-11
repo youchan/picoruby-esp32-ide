@@ -4,7 +4,7 @@ class Fibonacci
     @limit = limit
   end
 
-  def sequence
+  def sequence # project選択機能の確認
     (0...@limit).map { |n| calculate(n) }
   end
 

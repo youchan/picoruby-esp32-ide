@@ -4,8 +4,9 @@ require "json"
 set :public_folder, File.join(__dir__, "public")
 set :views, File.join(__dir__, "views")
 
-# 編集対象として公開するプロジェクトのルートディレクトリ
-PROJECT_ROOT = File.expand_path("../project", __dir__)
+# 編集対象として公開するプロジェクト群のルートディレクトリ。
+# 直下の各ディレクトリ(例: projects/sample)がそれぞれ独立した編集対象になる。
+PROJECTS_ROOT = File.expand_path("../projects", __dir__)
 
 # Funicular(PicoRuby.wasm)版フロントエンドの置き場所
 FUNICULAR_ROOT = File.expand_path("funicular", __dir__)
@@ -14,11 +15,33 @@ FUNICULAR_ROOT = File.expand_path("funicular", __dir__)
 ALLOWED_EXTENSIONS = %w[.rb .c .h].freeze
 
 helpers do
+  # PROJECTS_ROOT 直下にあるディレクトリ名(= プロジェクト名)の一覧
+  def available_projects
+    Dir.children(PROJECTS_ROOT).select { |name| File.directory?(File.join(PROJECTS_ROOT, name)) }.sort
+  end
+
+  # プロジェクト名をパストラバーサル対策しつつ絶対パスに変換する。
+  # 未指定時は available_projects の先頭を既定として使う
+  # (project を指定しない古いクライアントとの互換性のため)。
+  # 戻り値は [プロジェクト名, 絶対パス] のペア。
+  def project_root(name)
+    name = name.to_s.empty? ? nil : name.to_s
+    name ||= available_projects.first
+    raise ArgumentError, "no project available" if name.nil?
+    raise ArgumentError, "invalid project" if name.include?(File::SEPARATOR) || name.include?("..")
+
+    full = File.expand_path(File.join(PROJECTS_ROOT, name))
+    root_with_sep = PROJECTS_ROOT + File::SEPARATOR
+    raise ArgumentError, "invalid project" unless full.start_with?(root_with_sep) && File.directory?(full)
+
+    [name, full]
+  end
+
   # path traversal (../ などによる範囲外アクセス) を防ぎつつ絶対パスに変換する
-  def safe_path(rel_path)
-    full = File.expand_path(File.join(PROJECT_ROOT, rel_path.to_s))
-    root_with_sep = PROJECT_ROOT + File::SEPARATOR
-    unless full == PROJECT_ROOT || full.start_with?(root_with_sep)
+  def safe_path(root, rel_path)
+    full = File.expand_path(File.join(root, rel_path.to_s))
+    root_with_sep = root + File::SEPARATOR
+    unless full == root || full.start_with?(root_with_sep)
       raise ArgumentError, "invalid path"
     end
     full
@@ -53,15 +76,27 @@ get "/legacy" do
   erb :index
 end
 
-# 編集可能なファイル一覧を返す
+# 編集可能なプロジェクト一覧を返す
+get "/api/projects" do
+  content_type :json
+  available_projects.to_json
+end
+
+# 指定プロジェクトの編集可能なファイル一覧を返す
 get "/api/files" do
   content_type :json
 
-  files = Dir.glob(File.join(PROJECT_ROOT, "**", "*")).select do |f|
+  begin
+    _name, root = project_root(params[:project])
+  rescue ArgumentError
+    json_error(400, "invalid project")
+  end
+
+  files = Dir.glob(File.join(root, "**", "*")).select do |f|
     File.file?(f) && ALLOWED_EXTENSIONS.include?(File.extname(f))
   end
 
-  relative_paths = files.map { |f| f.sub(PROJECT_ROOT + File::SEPARATOR, "") }.sort
+  relative_paths = files.map { |f| f.sub(root + File::SEPARATOR, "") }.sort
 
   relative_paths.to_json
 end
@@ -74,7 +109,8 @@ get "/api/file" do
   json_error(400, "path is required") if rel.nil? || rel.empty?
 
   begin
-    full = safe_path(rel)
+    _name, root = project_root(params[:project])
+    full = safe_path(root, rel)
   rescue ArgumentError
     json_error(400, "invalid path")
   end
@@ -103,7 +139,8 @@ post "/api/file" do
   json_error(400, "content is required") if content.nil?
 
   begin
-    full = safe_path(rel)
+    _name, root = project_root(payload["project"])
+    full = safe_path(root, rel)
   rescue ArgumentError
     json_error(400, "invalid path")
   end

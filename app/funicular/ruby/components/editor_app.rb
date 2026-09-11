@@ -20,8 +20,11 @@ class EditorApp < Funicular::Component
 
   def initialize_state
     {
+      projects: [],
+      loading_projects: true,
+      current_project: nil,
       files: [],
-      loading_files: true,
+      loading_files: false,
       current_path: nil,
       content: '',
       saved_content: '',
@@ -31,7 +34,7 @@ class EditorApp < Funicular::Component
   end
 
   def component_mounted
-    load_file_list
+    load_project_list
   end
 
   # state が変わるたびに呼ばれる(Funicular::Component#patch から引数なしで呼ばれる)。
@@ -48,12 +51,21 @@ class EditorApp < Funicular::Component
 
   def render
     div(class: 'app') do
-      component(FileList,
-        files: state[:files],
-        loading: state[:loading_files],
-        current_path: state[:current_path],
-        on_select: ->(path) { open_file(path) }
-      )
+      div(class: 'sidebar') do
+        component(ProjectList,
+          projects: state[:projects],
+          loading: state[:loading_projects],
+          current_project: state[:current_project],
+          on_select: ->(name) { select_project(name) }
+        )
+
+        component(FileList,
+          files: state[:files],
+          loading: state[:loading_files],
+          current_path: state[:current_path],
+          on_select: ->(path) { open_file(path) }
+        )
+      end
 
       div(class: 'editor-area') do
         component(Toolbar,
@@ -142,8 +154,43 @@ class EditorApp < Funicular::Component
 
   # --- サーバとのやりとり ----------------------------------------------
 
-  def load_file_list
-    Funicular::HTTP.get('/api/files') do |response|
+  def load_project_list
+    Funicular::HTTP.get('/api/projects') do |response|
+      if response.ok
+        projects = response.data || []
+        patch(projects: projects, loading_projects: false)
+        select_project(projects.first) if state[:current_project].nil? && !projects.empty?
+      else
+        patch(
+          projects: [],
+          loading_projects: false,
+          status: 'プロジェクト一覧の取得に失敗しました',
+          status_kind: 'error'
+        )
+      end
+    end
+  end
+
+  def select_project(name)
+    return if name == state[:current_project]
+
+    patch(
+      current_project: name,
+      files: [],
+      loading_files: true,
+      current_path: nil,
+      content: '',
+      saved_content: '',
+      status: '',
+      status_kind: ''
+    )
+    # プロジェクト切り替え時は非制御の textarea もクリアしておく
+    sync_textarea('')
+    load_file_list(name)
+  end
+
+  def load_file_list(project)
+    Funicular::HTTP.get("/api/files?project=#{encode(project)}") do |response|
       if response.ok
         patch(files: response.data || [], loading_files: false)
       else
@@ -161,8 +208,9 @@ class EditorApp < Funicular::Component
     return if path == state[:current_path]
 
     patch(status: '読み込み中…', status_kind: '')
+    project = state[:current_project]
 
-    Funicular::HTTP.get("/api/file?path=#{encode(path)}") do |response|
+    Funicular::HTTP.get("/api/file?project=#{encode(project)}&path=#{encode(path)}") do |response|
       if response.ok
         content = value_of(response.data, 'content').to_s
         patch(
@@ -188,7 +236,7 @@ class EditorApp < Funicular::Component
     # 送信時点の内容を控えておく(レスポンスが返る頃には編集が進んでいる可能性がある)
     sending = state[:content]
 
-    Funicular::HTTP.post('/api/file', { path: path, content: sending }) do |response|
+    Funicular::HTTP.post('/api/file', { project: state[:current_project], path: path, content: sending }) do |response|
       if response.ok
         patch(saved_content: sending, status: '保存しました', status_kind: 'ok')
       else

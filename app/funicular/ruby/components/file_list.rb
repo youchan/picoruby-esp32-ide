@@ -7,7 +7,7 @@ class FileList < Funicular::Component
   def render
     files = props[:files] || []
 
-    div(class: 'sidebar') do
+    div(class: 'file-list-section') do
       h1 { 'Project Files' }
       ul(class: 'file-list') do
         if props[:loading]
