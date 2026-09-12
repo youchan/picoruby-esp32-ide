@@ -29,7 +29,11 @@ class EditorApp < Funicular::Component
       content: '',
       saved_content: '',
       status: '',
-      status_kind: ''
+      status_kind: '',
+      build_status: 'idle',
+      build_log: '',
+      build_log_truncated: false,
+      building: false
     }
   end
 
@@ -93,6 +97,15 @@ class EditorApp < Funicular::Component
             render_textarea
           end
         end
+
+        component(BuildPanel,
+          build_status: state[:build_status],
+          build_log: state[:build_log],
+          build_log_truncated: state[:build_log_truncated],
+          building: state[:building],
+          on_build: -> { start_build },
+          on_refresh: -> { refresh_build_status }
+        )
       end
     end
   end
@@ -246,6 +259,59 @@ class EditorApp < Funicular::Component
           status_kind: 'error'
         )
       end
+    end
+  end
+
+  def start_build
+    return if state[:building]
+
+    patch(building: true, build_status: 'running', build_log: '')
+
+    Funicular::HTTP.post('/api/build', {}) do |response|
+      if response.ok
+        schedule_build_poll
+      else
+        message = response.error_message
+        patch(
+          building: false,
+          build_status: 'failed',
+          build_log: (message && !message.empty?) ? message : 'ビルドの開始に失敗しました'
+        )
+      end
+    end
+  end
+
+  # ビルド中は一定間隔で自動的にログを取りに行く。完了(running以外)になったら止める。
+  #
+  # PicoRubyの JS::Object#setTimeout は setTimeout(delay_ms, &block) というシグネチャ
+  # (picoruby-wasm の mrblib/js.rb 参照)で、コールバックは第一引数ではなくブロックとして
+  # 渡す。JS.global.setTimeout(callback, delay) のように2引数で渡すと
+  # 「ArgumentError: wrong number of arguments (given 2, expected 1)」になる。
+  def schedule_build_poll
+    JS.global.setTimeout(3000) { refresh_build_status }
+  end
+
+  def refresh_build_status
+    Funicular::HTTP.get('/api/build') do |response|
+      next unless response.ok
+
+      data = response.data || {}
+      status = value_of(data, 'status').to_s
+      log = value_of(data, 'log').to_s
+      log_truncated = truthy?(value_of(data, 'log_truncated'))
+      still_running = status == 'running'
+
+      patch(
+        build_status: status,
+        build_log: log,
+        build_log_truncated: log_truncated,
+        building: still_running
+      )
+
+      # running の間だけポーリングを継続する。手動の「ログを更新」クリックと
+      # ポーリングのタイマーが両方生きていると呼び出しが二重になりうるが、
+      # 単なる冗長リクエストで実害はないため許容している
+      schedule_build_poll if still_running
     end
   end
 

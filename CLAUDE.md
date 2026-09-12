@@ -73,6 +73,38 @@ Rubyプロジェクトの中で、Ruby(`.rb`)とC(`.c` `.h`)のソースコー�
 - `POST /api/file` — `{path, content}` を受け取り、既存ファイルを上書き保存する
   (新規作成は不可。`ALLOWED_EXTENSIONS` にないファイルや `project/` 外は拒否)
 - `safe_path` ヘルパーでパストラバーサル対策済み
+- `GET /api/build` — R2P2-ESP32 のビルド状態(`idle`/`running`/`success`/`failed`)とログを返す。
+  UI からのポーリング用。ログは末尾 `BUILD_LOG_TAIL_LIMIT`(8,000文字)のみを返し、
+  切り詰めた場合は `log_truncated: true` を含める
+  (ブラウザ内のPicoRuby.wasmで全量(100KB超になりうる)をJSONパース/描画すると
+  数秒〜十秒近くかかり、「反応がない」ように見えてしまう問題への対処)
+- `POST /api/build` — `R2P2_ESP32_ROOT`(`../R2P2-ESP32`、Docker内では `/R2P2-ESP32`)で
+  `idf.py build` をバックグラウンドスレッドで起動する。実行中に重ねて叩くと 409
+  - `idf.py` は ESP-IDF の `export.sh` を読み込んだシェルでないと使えないため、
+    実行コマンド内で `$IDF_PATH/export.sh` を明示的に source してから呼んでいる。
+    Dockerのentrypoint(`R2P2-ESP32/docker/Dockerfile`)は起動時に一度export済みだが、
+    `docker exec` 等で入った場合はexportされていないことがあり、それに頼らない実装にした
+  - 状態は `BUILD_MUTEX` + `BUILD_STATE` のプロセス内グローバル変数で保持する簡易実装。
+    同時に1本しか走らせない前提で、複数人が同時にビルドを叩く運用は想定していない
+
+UI側(`app/funicular/ruby/components/editor_app.rb`)はビルド中、
+`JS.global.setTimeout(3000) { refresh_build_status }` で3秒おきに自動的にログを
+取りに行く(runningでなくなったら止まる)。「ログを更新」ボタンはこれとは別に、
+すぐ最新状態を見たいときの手動トリガーとして残してある。
+
+**ここで踏んだ罠**: PicoRuby.wasmの `JS::Object#setTimeout` は Ruby標準の
+`Kernel#sleep` 的な感覚で `JS.global.setTimeout(callback_proc, delay_ms)` のように
+2引数で呼びたくなるが、実際のシグネチャは `setTimeout(delay_ms, &block)`
+(picoruby本体 `mrbgems/picoruby-wasm/mrblib/js.rb` 参照)で、コールバックは
+**ブロックとして**渡す必要がある。2引数で呼ぶと
+`ArgumentError: wrong number of arguments (given 2, expected 1)` になり、
+しかもこの例外はブラウザの `console.error` に `Callback <id>: ArgumentError: ...`
+という形で出るだけで、Rubyコード上は握りつぶされて画面には何も出ない
+(=「ボタンを押しても何も起きない」ように見える)。正しくは
+`JS.global.setTimeout(3000) { ... }` のようにブロックで渡す。
+同様のAPIを追加するときは `js.rb` のソース(`gh api
+repos/picoruby/picoruby/contents/mrbgems/picoruby-wasm/mrblib/js.rb`)を
+先に確認したほうが早い。
 
 ### エディタ (`public/js/editor.js` + `views/index.erb` + `style.css`)
 
@@ -111,3 +143,37 @@ READMEにも記載しているが、Claude Codeで次に着手する際の候補
 - esm.sh経由のESM CDN importは、今回のようなバージョン解決の不安定さが起きやすいので、
   今後もCDN経由でJSライブラリを追加する場合は、安定版の `<script>` タグ+バージョン固定URLを
   優先する方針でよい
+
+### Dockerでの開発時マウント(`bin/dev`)
+
+開発中に `app/` をbind mountしてホスト側の編集を即座に反映したい、という要望があった。
+`app/` のコピー先を `/root` → `/root/app` に変更して `-v $(pwd)/app:/root/app` の
+1行で済ませる案も試したが、`app.rb` の `PROJECTS_ROOT` / `R2P2_ESP32_ROOT` が
+`File.expand_path("../projects", __dir__)` のように `__dir__`(=app.rbの場所)からの
+相対パスで解決しているため、`app/` を1階層深くすると `../projects` の解決先が
+`/projects` から `/root/projects` にズレて `Errno::ENOENT` になる問題が出た
+(`R2P2_ESP32_ROOT` も同様)。Dockerfile側でsymlinkを張って辻褄を合わせる案も
+検討したが、Dockerfileに手を入れるほどのことではないと判断し、**Dockerfileは
+`COPY app/ .`(WORKDIR `/root`)のまま変更せず**、代わりに開発用の起動コマンドを
+`bin/dev` というシェルスクリプトに切り出した。
+
+```bash
+./bin/dev
+```
+
+中身は `app/` 配下のサブディレクトリを個別に(Dockerfileの配置に合わせて)
+`/root` 直下へマウントするだけの `docker run` ラッパー。Rakefileにして
+`rake dev` のようなタスクにする案もあったが、Webアプリの起動ラッパー程度で
+rake依存を持ち込む必要はない(R2P2-ESP32側の `Rakefile`/`rakelib/docker.rake` は
+ESP-IDFのビルドタスク管理のためのもので、役割が異なる)と判断し見送った。
+
+- `views/index.erb` ・ `public/css` ・ `funicular/ruby/*.rb` はリクエストのたびに
+  読み直される(ERBレンダリング / `File.read`)ので、マウント元を編集してブラウザを
+  リロードするだけで反映される
+- `app.rb` 自体(ルーティング等)を変更した場合はSinatra起動時に読み込まれるため、
+  コンテナの再起動が必要
+- コンテナはroot権限で動くため、UI経由の保存(`POST /api/file`)でホスト側に
+  書き込まれるファイルはroot所有になる点に注意
+- `R2P2-ESP32/` はデフォルトではマウント対象外(イメージビルド時にセットアップ済みの
+  ものをそのまま使う)。ソースも編集したい場合は `bin/dev` に
+  `-v "$(pwd)/R2P2-ESP32:/R2P2-ESP32"` を追加する

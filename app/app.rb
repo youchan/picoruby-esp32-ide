@@ -1,5 +1,7 @@
 require "sinatra"
 require "json"
+require "open3"
+require "shellwords"
 
 set :public_folder, File.join(__dir__, "public")
 set :views, File.join(__dir__, "views")
@@ -11,8 +13,22 @@ PROJECTS_ROOT = File.expand_path("../projects", __dir__)
 # Funicular(PicoRuby.wasm)版フロントエンドの置き場所
 FUNICULAR_ROOT = File.expand_path("funicular", __dir__)
 
+# ビルド対象の R2P2-ESP32 プロジェクトルート。
+# Dockerfile では /R2P2-ESP32 に、ローカル開発では ../R2P2-ESP32 に配置される
+# (projects/ と同じ __dir__ 相対の解決方法に合わせてある)。
+R2P2_ESP32_ROOT = File.expand_path("../R2P2-ESP32", __dir__)
+
 # 編集を許可する拡張子(Ruby / C)
 ALLOWED_EXTENSIONS = %w[.rb .c .h].freeze
+
+# ビルドの実行状態。同時に1本しか走らせない前提の簡易な共有ステートで、
+# 複数人が同時にビルドを叩く運用は想定していない(このプロジェクトの他機能と同様)。
+BUILD_MUTEX = Mutex.new
+BUILD_STATE = { status: "idle", log: "", started_at: nil, finished_at: nil }
+
+# ブラウザ(PicoRuby.wasm)側でのJSONパース/描画が重くなりすぎないよう、
+# API経由で返すログは末尾のみに切り詰める。全量はサーバ側の BUILD_STATE[:log] に残る。
+BUILD_LOG_TAIL_LIMIT = 8_000
 
 helpers do
   # PROJECTS_ROOT 直下にあるディレクトリ名(= プロジェクト名)の一覧
@@ -152,4 +168,73 @@ post "/api/file" do
   File.write(full, content)
 
   { status: "ok", path: rel, bytes: content.bytesize }.to_json
+end
+
+# R2P2-ESP32 のビルド状態(実行中/成功/失敗/未実行)とログを返す。
+# UI 側はこれをポーリングして進捗を表示する。ログは末尾 BUILD_LOG_TAIL_LIMIT 文字のみ。
+get "/api/build" do
+  content_type :json
+
+  BUILD_MUTEX.synchronize do
+    full_log = BUILD_STATE[:log]
+    truncated = full_log.length > BUILD_LOG_TAIL_LIMIT
+
+    {
+      status: BUILD_STATE[:status],
+      log: truncated ? full_log[-BUILD_LOG_TAIL_LIMIT..-1] : full_log,
+      log_truncated: truncated,
+      started_at: BUILD_STATE[:started_at],
+      finished_at: BUILD_STATE[:finished_at]
+    }.to_json
+  end
+end
+
+# R2P2-ESP32 のビルド(idf.py build)をバックグラウンドで開始する。
+# 実行中に重ねて叩かれた場合は 409 を返す(同時に複数走らせない)。
+post "/api/build" do
+  content_type :json
+
+  started = BUILD_MUTEX.synchronize do
+    break false if BUILD_STATE[:status] == "running"
+
+    BUILD_STATE[:status] = "running"
+    BUILD_STATE[:log] = ""
+    BUILD_STATE[:started_at] = Time.now.to_i
+    BUILD_STATE[:finished_at] = nil
+    true
+  end
+
+  json_error(409, "build already running") unless started
+
+  Thread.new { run_r2p2_build }
+
+  { status: "ok" }.to_json
+end
+
+# idf.py は ESP-IDF の export.sh を読み込んだシェルでしか使えない。
+# コンテナのエントリポイントで export 済みの環境ならそのまま動くが、
+# (docker exec 経由など)export されていない場合に備えて明示的に読み込む。
+def run_r2p2_build
+  cmd = "cd #{Shellwords.escape(R2P2_ESP32_ROOT)} && " \
+        "if [ -n \"$IDF_PATH\" ] && [ -f \"$IDF_PATH/export.sh\" ]; then " \
+        ". \"$IDF_PATH/export.sh\" > /dev/null; fi && idf.py build"
+
+  Open3.popen2e("bash", "-c", cmd) do |stdin, stdout_and_stderr, wait_thread|
+    stdin.close
+    stdout_and_stderr.each_line do |line|
+      BUILD_MUTEX.synchronize { BUILD_STATE[:log] << line }
+    end
+
+    success = wait_thread.value.success?
+    BUILD_MUTEX.synchronize do
+      BUILD_STATE[:status] = success ? "success" : "failed"
+      BUILD_STATE[:finished_at] = Time.now.to_i
+    end
+  end
+rescue StandardError => e
+  BUILD_MUTEX.synchronize do
+    BUILD_STATE[:status] = "failed"
+    BUILD_STATE[:log] << "\n[#{e.class}] #{e.message}\n"
+    BUILD_STATE[:finished_at] = Time.now.to_i
+  end
 end

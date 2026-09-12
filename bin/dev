@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# 開発用: app/ と projects/ をホストからbind mountしてコンテナを起動する。
+#
+# app.rb は __dir__(app.rbの場所)からの相対パスで projects/ を解決している
+# ( PROJECTS_ROOT = File.expand_path("../projects", __dir__) )ため、
+# app/ の中身は Dockerfile と同じ配置(WORKDIR /root 直下)になるようマウントする。
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+docker run --rm -p 4567:4567 \
+  -v "$(pwd)/app/app.rb:/root/app.rb" \
+  -v "$(pwd)/app/public:/root/public" \
+  -v "$(pwd)/app/views:/root/views" \
+  -v "$(pwd)/app/funicular:/root/funicular" \
+  -v "$(pwd)/projects:/projects" \
+  picoruby-ide "$@"
