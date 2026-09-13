@@ -121,6 +121,8 @@ class EditorApp < Funicular::Component
           on_select: ->(name) { start_platform_setup(name) },
           on_refresh: -> { refresh_platform_status }
         )
+
+        component(InstallPanel)
       end
     end
   end

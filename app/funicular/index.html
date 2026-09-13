@@ -19,6 +19,15 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.30.0/components/prism-ruby.min.js"></script>
 
   <!--
+    ESP Web Tools (https://esphome.github.io/esp-web-tools/)。
+    <esp-web-install-button> カスタム要素を登録する。ブラウザのWeb Serial API経由で
+    ESP32にファームウェアを書き込む処理はすべてこのライブラリに任せている
+    (サーバ側は /api/firmware/manifest.json でマニフェストを返すだけ)。
+    バージョン固定のCDN読み込み方針は他のライブラリと同様。
+  -->
+  <script type="module" src="https://cdn.jsdelivr.net/npm/esp-web-tools@10.4.0/dist/web/install-button.js"></script>
+
+  <!--
     Ruby(Funicular)側から呼ぶための薄いJSラッパ。
     Prismの細かい作法(文法オブジェクトの取り出し、末尾改行の補正)はここに閉じ込めて、
     Ruby側は funicularHighlight(code, lang) だけ知っていればよい状態にする。
@@ -44,6 +53,7 @@
   <script type="text/ruby" src="/ruby/components/toolbar.rb"></script>
   <script type="text/ruby" src="/ruby/components/build_panel.rb"></script>
   <script type="text/ruby" src="/ruby/components/platform_panel.rb"></script>
+  <script type="text/ruby" src="/ruby/components/install_panel.rb"></script>
   <script type="text/ruby" src="/ruby/components/editor_app.rb"></script>
   <script type="text/ruby" src="/ruby/main.rb"></script>
 

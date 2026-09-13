@@ -145,15 +145,47 @@ READMEにも記載しているが、Claude Codeで次に着手する際の候補
 - **対応拡張子が `.rb` `.c` `.h` のみ**: 増やす場合は `app.rb` の `ALLOWED_EXTENSIONS`、
   `views/index.erb` のPrismコンポーネント読み込み、`editor.js` の `languageFor` /
   `iconFor` の3箇所を対応させる必要がある
-- **実機への書き込み(flash)が未実装**: プラットフォーム選択+セットアップ
-  (`POST /api/platform`)までは実装済みだが、ビルド済みイメージをUSB接続した
-  ESP32に書き込む機能(`R2P2-ESP32/rakelib/flash.rake` の `flash` タスク相当)は
-  まだない。公式の [R2P2-ESP32-installer](https://picoruby.org/R2P2-ESP32-installer/)
-  はブラウザのWeb Serial API(ESP Web Tools)で直接USBに書き込む方式だが、
-  今のこのプロジェクトのアーキテクチャ(サーバ側=Dockerコンテナでrake/idf.pyを実行)
-  で同じことをするには、コンテナにUSBシリアルデバイスを渡す
-  (`docker run --device /dev/ttyUSB0` 等、`bin/dev` の変更が要る)か、
-  Web Serial API側に倒すか、設計判断が必要
+### 実機への書き込み(インストール)機能
+
+ビルド(`idf.py build`)・プラットフォームセットアップ(`rake setup_xxx`)とは違い、
+書き込みだけは**サーバ側で`rake flash`を実行する方式にしなかった**。理由は、
+サーバがDockerコンテナ内で動く前提だと、コンテナにUSBシリアルデバイスを渡す
+(`docker run --device /dev/ttyUSB0` 等)必要があり、`bin/dev`の変更やホスト環境の
+デバイスパス依存が増えて複雑になるため。代わりに公式の
+[R2P2-ESP32-installer](https://picoruby.org/R2P2-ESP32-installer/)と同じ、
+**ブラウザのWeb Serial API経由([ESP Web Tools](https://esphome.github.io/esp-web-tools/)、
+`esp-web-install-button`カスタム要素)でブラウザから直接USBに書き込む方式**を採用した。
+これによりサーバは「ビルド成果物を配信するだけ」でよくなり、USBデバイスの取り回しを
+気にする必要がなくなる(ただしChrome/Edge/OperaなどWeb Serial API対応ブラウザが必須)。
+
+- `GET /api/firmware/manifest.json` — ESP Web Tools用のマニフェストを、直近のビルド
+  成果物(`R2P2-ESP32/build/project_description.json` の `target` と
+  `R2P2-ESP32/build/flash_args`)から動的に組み立てて返す。ビルド未実行なら404
+  - `flash_args` は `idf.py build` が生成する、esptoolの`write_flash`にそのまま渡せる
+    `<オフセット(16進)> <binへの相対パス>` の行の並び(1行目は`--flash_mode`等の
+    オプション行なので読み飛ばす)。実際の中身の例:
+    ```
+    --flash_mode dio --flash_freq 40m --flash_size 4MB
+    0x1000 bootloader/bootloader.bin
+    0x10000 R2P2-ESP32.bin
+    0x8000 partition_table/partition-table.bin
+    0x210000 storage.bin
+    ```
+  - `target`(`esp32`等、`idf.py set-target`の引数と同じ)→ESP Web Toolsの`chipFamily`
+    (`ESP32`等)への変換テーブルが `CHIP_FAMILY_MAP`。ESP Web Tools側の対応チップ一覧は
+    `gh api repos/esphome/esp-web-tools/contents/src/const.ts` の `Build#chipFamily`
+    で確認した(`PLATFORM_TARGETS` にある6種は全部サポートされている)
+- `GET /api/firmware/:filename` — 上記マニフェストが指す`.bin`を配信する
+  (拡張子とパストラバーサル対策あり)
+- UI側(`install_panel.rb`)は状態を持たない。`<esp-web-install-button manifest="...">`
+  を配置するだけで、実際の書き込み処理・進捗ダイアログはESP Web Tools側が全部担う。
+  ボタンのコールバックは `manifest` を**HTML属性**として読む
+  (`button.manifest || button.getAttribute("manifest")`、
+  `esp-web-tools/src/connect.ts` 参照)ので、Funicularの`tag`で属性として渡せばよい
+  - `index.html` で `<script type="module" src=".../esp-web-tools@10.4.0/dist/web/
+    install-button.js">` をCDN読み込み。バージョン固定の方針は他ライブラリと同様
+  - 実機なしでも「No port selected」ダイアログ(ESP Web Tools自身が出す、Linuxの
+    dialoutグループ設定などのトラブルシューティング付き)が出ることをブラウザで確認済み
 
 ## 開発環境まわりの注意点
 

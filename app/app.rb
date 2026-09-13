@@ -312,3 +312,75 @@ post "/api/platform" do
 
   { status: "ok", platform: platform }.to_json
 end
+
+# デバイスへの書き込み(インストール)は ESP Web Tools
+# (https://esphome.github.io/esp-web-tools/、index.html でCDN読み込み)経由の
+# ブラウザのWeb Serial APIで行う。サーバはビルド成果物からマニフェストと.binを
+# 配信するだけで、実際の書き込み処理はブラウザ側(esp-web-install-button)が担う。
+FIRMWARE_BUILD_DIR = File.join(R2P2_ESP32_ROOT, "build")
+
+# idf.py set-target のターゲット名 → ESP Web Tools の chipFamily 名。
+# ESP Web Tools が対応しているチップ一覧(esp-web-tools/src/const.ts の Build#chipFamily)
+# のうち、R2P2-ESP32側がサポートしている(PLATFORM_TARGETSにある)ものだけ載せてある。
+CHIP_FAMILY_MAP = {
+  "esp32" => "ESP32",
+  "esp32c3" => "ESP32-C3",
+  "esp32c6" => "ESP32-C6",
+  "esp32h2" => "ESP32-H2",
+  "esp32p4" => "ESP32-P4",
+  "esp32s3" => "ESP32-S3"
+}.freeze
+
+# ESP Web Tools 用のマニフェストを、直近のビルド成果物
+# (build/project_description.json の "target" と build/flash_args)から動的に組み立てる。
+# flash_args は `idf.py build` が生成する、esptool write_flash にそのまま渡せる
+# "<オフセット(16進)> <binへの相対パス>" の行の並び(1行目は --flash_mode 等のオプション行)。
+get "/api/firmware/manifest.json" do
+  content_type :json
+
+  desc_path = File.join(FIRMWARE_BUILD_DIR, "project_description.json")
+  flash_args_path = File.join(FIRMWARE_BUILD_DIR, "flash_args")
+  json_error(404, "not built yet") unless File.file?(desc_path) && File.file?(flash_args_path)
+
+  target = JSON.parse(File.read(desc_path))["target"]
+  chip_family = CHIP_FAMILY_MAP[target]
+  json_error(500, "unsupported target: #{target}") unless chip_family
+
+  parts = File.readlines(flash_args_path).drop(1).filter_map do |line|
+    line = line.strip
+    next if line.empty?
+
+    offset_hex, rel_path = line.split(" ", 2)
+    # rel_path は "bootloader/bootloader.bin" のようにサブディレクトリを含むことがある。
+    # basename に切り詰めると実体(build/bootloader/bootloader.bin)と食い違って
+    # 404になるため、相対パスのままURLに使う(下の配信ルート側もそれに合わせてある)。
+    { path: "/api/firmware/#{rel_path}", offset: Integer(offset_hex, 16) }
+  end
+
+  {
+    name: "R2P2-ESP32",
+    version: Time.now.strftime("%Y%m%d%H%M%S"),
+    builds: [{ chipFamily: chip_family, parts: parts }]
+  }.to_json
+end
+
+# ビルド成果物の .bin ファイルを配信する。flash_args の相対パスをそのまま受け取る
+# (例: "bootloader/bootloader.bin" のようにサブディレクトリを含むことがある)ので、
+# 固定セグメントの :filename ではなくワイルドカードで受ける。
+# manifestのpartsが返すpathはここに合わせてある。
+get "/api/firmware/*" do
+  rel_path = params[:splat].first
+  json_error(400, "invalid filename") unless rel_path.end_with?(".bin")
+
+  full =
+    begin
+      safe_path(FIRMWARE_BUILD_DIR, rel_path)
+    rescue ArgumentError
+      json_error(400, "invalid path")
+    end
+
+  json_error(404, "file not found") unless File.file?(full)
+
+  content_type "application/octet-stream"
+  File.read(full, mode: "rb")
+end
