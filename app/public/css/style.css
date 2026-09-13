@@ -320,6 +320,56 @@ button.build-refresh:hover:not(:disabled) {
   color: var(--text);
 }
 
+.platform-panel {
+  flex-shrink: 0;
+  max-height: 220px;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--border);
+  background: var(--bg-toolbar);
+}
+
+.platform-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.platform-panel-header h1 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+  margin: 0;
+  flex: 1;
+}
+
+.platform-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+button.platform-btn {
+  background: #555;
+}
+
+button.platform-btn:hover:not(:disabled) {
+  background: #6a6a6a;
+}
+
+button.platform-btn.active {
+  background: var(--accent);
+}
+
+button.platform-btn.active:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
 /* Prismのトークンカラー(one-dark寄りのシンプルな配色) */
 .token.comment { color: #6a9955; font-style: italic; }
 .token.string,

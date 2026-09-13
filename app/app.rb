@@ -6,6 +6,23 @@ require "shellwords"
 set :public_folder, File.join(__dir__, "public")
 set :views, File.join(__dir__, "views")
 
+# 開発中(bin/dev、RACK_ENV=development)は app/ をbind mountして頻繁にファイルを
+# 差し替えるため、ブラウザキャッシュのせいで更新が反映されずハマる方が実害が大きい。
+# 本番相当(Dockerfileの素のCMD起動、RACK_ENV=production)では逆にキャッシュさせたい。
+if settings.development?
+  set :static_cache_control, [:no_store, :no_cache, :must_revalidate]
+
+  before do
+    cache_control :no_store, :no_cache, :must_revalidate
+  end
+else
+  set :static_cache_control, [:public, max_age: 3600]
+
+  before do
+    cache_control :public, max_age: 3600
+  end
+end
+
 # 編集対象として公開するプロジェクト群のルートディレクトリ。
 # 直下の各ディレクトリ(例: projects/sample)がそれぞれ独立した編集対象になる。
 PROJECTS_ROOT = File.expand_path("../projects", __dir__)
@@ -21,14 +38,81 @@ R2P2_ESP32_ROOT = File.expand_path("../R2P2-ESP32", __dir__)
 # 編集を許可する拡張子(Ruby / C)
 ALLOWED_EXTENSIONS = %w[.rb .c .h].freeze
 
-# ビルドの実行状態。同時に1本しか走らせない前提の簡易な共有ステートで、
-# 複数人が同時にビルドを叩く運用は想定していない(このプロジェクトの他機能と同様)。
-BUILD_MUTEX = Mutex.new
-BUILD_STATE = { status: "idle", log: "", started_at: nil, finished_at: nil }
+# setup_esp32xxx タスクが存在するターゲット一覧(R2P2-ESP32/rakelib/setup.rake参照)。
+# rakeタスク名の組み立てに使うため、ここに無い値は拒否する(コマンドインジェクション対策)。
+PLATFORM_TARGETS = %w[esp32 esp32c3 esp32c6 esp32h2 esp32p4 esp32s3].freeze
 
-# ブラウザ(PicoRuby.wasm)側でのJSONパース/描画が重くなりすぎないよう、
-# API経由で返すログは末尾のみに切り詰める。全量はサーバ側の BUILD_STATE[:log] に残る。
-BUILD_LOG_TAIL_LIMIT = 8_000
+# サーバ内で1本しか同時実行しないバックグラウンドジョブの実行状態を管理する。
+# ビルド(idf.py build)とプラットフォームセットアップ(rake setup_xxx)の両方で使う、
+# 複数人が同時に叩く運用は想定していない簡易な共有ステート。
+class BackgroundJob
+  # ブラウザ(PicoRuby.wasm)側でのJSONパース/描画が重くなりすぎないよう、
+  # API経由で返すログは末尾のみに切り詰める。全量は @state[:log] に残る。
+  LOG_TAIL_LIMIT = 8_000
+
+  def initialize
+    @mutex = Mutex.new
+    @state = { status: "idle", log: "", started_at: nil, finished_at: nil }
+  end
+
+  # 実行中でなければバックグラウンドスレッドでcmdを開始してtrueを返す。
+  # 実行中ならなにもせずfalseを返す(呼び出し側で409にする)。
+  def start(cmd)
+    started = @mutex.synchronize do
+      break false if @state[:status] == "running"
+
+      @state[:status] = "running"
+      @state[:log] = ""
+      @state[:started_at] = Time.now.to_i
+      @state[:finished_at] = nil
+      true
+    end
+
+    Thread.new { run(cmd) } if started
+    started
+  end
+
+  def to_response_json
+    @mutex.synchronize do
+      full_log = @state[:log]
+      truncated = full_log.length > LOG_TAIL_LIMIT
+
+      {
+        status: @state[:status],
+        log: truncated ? full_log[-LOG_TAIL_LIMIT..-1] : full_log,
+        log_truncated: truncated,
+        started_at: @state[:started_at],
+        finished_at: @state[:finished_at]
+      }.to_json
+    end
+  end
+
+  private
+
+  def run(cmd)
+    Open3.popen2e("bash", "-c", cmd) do |stdin, stdout_and_stderr, wait_thread|
+      stdin.close
+      stdout_and_stderr.each_line do |line|
+        @mutex.synchronize { @state[:log] << line }
+      end
+
+      success = wait_thread.value.success?
+      @mutex.synchronize do
+        @state[:status] = success ? "success" : "failed"
+        @state[:finished_at] = Time.now.to_i
+      end
+    end
+  rescue StandardError => e
+    @mutex.synchronize do
+      @state[:status] = "failed"
+      @state[:log] << "\n[#{e.class}] #{e.message}\n"
+      @state[:finished_at] = Time.now.to_i
+    end
+  end
+end
+
+BUILD_JOB = BackgroundJob.new
+PLATFORM_JOB = BackgroundJob.new
 
 helpers do
   # PROJECTS_ROOT 直下にあるディレクトリ名(= プロジェクト名)の一覧
@@ -69,8 +153,12 @@ helpers do
 end
 
 # エディタ画面(Funicular / PicoRuby.wasm 版)
+# send_file だと Last-Modified を自動付与し、ブラウザが If-Modified-Since で
+# 再検証してキャッシュ済みの古い本文を使い続けることがあった(development環境で
+# no-store を指定していても発生した)ため、File.read で素朴に返す。
 get "/" do
-  send_file File.join(FUNICULAR_ROOT, "index.html")
+  content_type :html
+  File.read(File.join(FUNICULAR_ROOT, "index.html"))
 end
 
 # Funicular アプリの Ruby ソース。
@@ -170,23 +258,20 @@ post "/api/file" do
   { status: "ok", path: rel, bytes: content.bytesize }.to_json
 end
 
+# idf.py / rake は ESP-IDF の export.sh を読み込んだシェルでしか使えない。
+# コンテナのエントリポイントで export 済みの環境ならそのまま動くが、
+# (docker exec 経由など)export されていない場合に備えて明示的に読み込む。
+def r2p2_shell_command(inner_cmd)
+  "cd #{Shellwords.escape(R2P2_ESP32_ROOT)} && " \
+    "if [ -n \"$IDF_PATH\" ] && [ -f \"$IDF_PATH/export.sh\" ]; then " \
+    ". \"$IDF_PATH/export.sh\" > /dev/null; fi && #{inner_cmd}"
+end
+
 # R2P2-ESP32 のビルド状態(実行中/成功/失敗/未実行)とログを返す。
-# UI 側はこれをポーリングして進捗を表示する。ログは末尾 BUILD_LOG_TAIL_LIMIT 文字のみ。
+# UI 側はこれをポーリングして進捗を表示する。
 get "/api/build" do
   content_type :json
-
-  BUILD_MUTEX.synchronize do
-    full_log = BUILD_STATE[:log]
-    truncated = full_log.length > BUILD_LOG_TAIL_LIMIT
-
-    {
-      status: BUILD_STATE[:status],
-      log: truncated ? full_log[-BUILD_LOG_TAIL_LIMIT..-1] : full_log,
-      log_truncated: truncated,
-      started_at: BUILD_STATE[:started_at],
-      finished_at: BUILD_STATE[:finished_at]
-    }.to_json
-  end
+  BUILD_JOB.to_response_json
 end
 
 # R2P2-ESP32 のビルド(idf.py build)をバックグラウンドで開始する。
@@ -194,47 +279,36 @@ end
 post "/api/build" do
   content_type :json
 
-  started = BUILD_MUTEX.synchronize do
-    break false if BUILD_STATE[:status] == "running"
-
-    BUILD_STATE[:status] = "running"
-    BUILD_STATE[:log] = ""
-    BUILD_STATE[:started_at] = Time.now.to_i
-    BUILD_STATE[:finished_at] = nil
-    true
-  end
-
+  started = BUILD_JOB.start(r2p2_shell_command("idf.py build"))
   json_error(409, "build already running") unless started
-
-  Thread.new { run_r2p2_build }
 
   { status: "ok" }.to_json
 end
 
-# idf.py は ESP-IDF の export.sh を読み込んだシェルでしか使えない。
-# コンテナのエントリポイントで export 済みの環境ならそのまま動くが、
-# (docker exec 経由など)export されていない場合に備えて明示的に読み込む。
-def run_r2p2_build
-  cmd = "cd #{Shellwords.escape(R2P2_ESP32_ROOT)} && " \
-        "if [ -n \"$IDF_PATH\" ] && [ -f \"$IDF_PATH/export.sh\" ]; then " \
-        ". \"$IDF_PATH/export.sh\" > /dev/null; fi && idf.py build"
+# プラットフォーム(ターゲットチップ)セットアップの実行状態とログを返す。
+get "/api/platform" do
+  content_type :json
+  PLATFORM_JOB.to_response_json
+end
 
-  Open3.popen2e("bash", "-c", cmd) do |stdin, stdout_and_stderr, wait_thread|
-    stdin.close
-    stdout_and_stderr.each_line do |line|
-      BUILD_MUTEX.synchronize { BUILD_STATE[:log] << line }
+# 指定プラットフォーム向けに `rake setup_#{platform}` をバックグラウンドで実行する。
+# setup_esp32xxx は deep_clean + setup(mrubyの再ビルド) + idf.py set-target という
+# 重い処理の直列実行(R2P2-ESP32/rakelib/setup.rake参照)。
+post "/api/platform" do
+  content_type :json
+
+  payload =
+    begin
+      JSON.parse(request.body.read)
+    rescue JSON::ParserError
+      json_error(400, "invalid json body")
     end
 
-    success = wait_thread.value.success?
-    BUILD_MUTEX.synchronize do
-      BUILD_STATE[:status] = success ? "success" : "failed"
-      BUILD_STATE[:finished_at] = Time.now.to_i
-    end
-  end
-rescue StandardError => e
-  BUILD_MUTEX.synchronize do
-    BUILD_STATE[:status] = "failed"
-    BUILD_STATE[:log] << "\n[#{e.class}] #{e.message}\n"
-    BUILD_STATE[:finished_at] = Time.now.to_i
-  end
+  platform = payload["platform"]
+  json_error(400, "invalid platform") unless PLATFORM_TARGETS.include?(platform)
+
+  started = PLATFORM_JOB.start(r2p2_shell_command("rake setup_#{platform}"))
+  json_error(409, "platform setup already running") unless started
+
+  { status: "ok", platform: platform }.to_json
 end

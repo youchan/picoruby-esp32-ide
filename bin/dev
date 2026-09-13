@@ -8,7 +8,11 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# RACK_ENV=development: DockerfileはイメージをそのままCMD起動した場合に備えて
+# production(キャッシュ有効)をデフォルトにしているので、ここで開発用に上書きする
+# (app.rb のキャッシュ制御ヘッダーの分岐を参照)。
 docker run --rm -p 4567:4567 \
+  -e RACK_ENV=development \
   -v "$(pwd)/app/app.rb:/root/app.rb" \
   -v "$(pwd)/app/public:/root/public" \
   -v "$(pwd)/app/views:/root/views" \

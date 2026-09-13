@@ -30,6 +30,10 @@ WORKDIR /root
 ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
 
+# イメージをそのまま `docker run` した場合は本番相当(キャッシュ有効)。
+# 開発時は bin/dev が RACK_ENV=development で上書きする(app.rb 参照)。
+ENV RACK_ENV=production
+
 COPY Gemfile Gemfile.lock ./
 RUN bundle install
 

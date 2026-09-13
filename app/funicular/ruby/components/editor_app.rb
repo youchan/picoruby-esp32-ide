@@ -33,7 +33,12 @@ class EditorApp < Funicular::Component
       build_status: 'idle',
       build_log: '',
       build_log_truncated: false,
-      building: false
+      building: false,
+      platform_status: 'idle',
+      platform_log: '',
+      platform_log_truncated: false,
+      platform_building: false,
+      selected_platform: nil
     }
   end
 
@@ -105,6 +110,16 @@ class EditorApp < Funicular::Component
           building: state[:building],
           on_build: -> { start_build },
           on_refresh: -> { refresh_build_status }
+        )
+
+        component(PlatformPanel,
+          platform_status: state[:platform_status],
+          platform_log: state[:platform_log],
+          platform_log_truncated: state[:platform_log_truncated],
+          building: state[:platform_building],
+          selected_platform: state[:selected_platform],
+          on_select: ->(name) { start_platform_setup(name) },
+          on_refresh: -> { refresh_platform_status }
         )
       end
     end
@@ -312,6 +327,56 @@ class EditorApp < Funicular::Component
       # ポーリングのタイマーが両方生きていると呼び出しが二重になりうるが、
       # 単なる冗長リクエストで実害はないため許容している
       schedule_build_poll if still_running
+    end
+  end
+
+  def start_platform_setup(name)
+    return if state[:platform_building]
+
+    patch(
+      platform_building: true,
+      platform_status: 'running',
+      platform_log: '',
+      selected_platform: name
+    )
+
+    Funicular::HTTP.post('/api/platform', { platform: name }) do |response|
+      if response.ok
+        schedule_platform_poll
+      else
+        message = response.error_message
+        patch(
+          platform_building: false,
+          platform_status: 'failed',
+          platform_log: (message && !message.empty?) ? message : 'セットアップの開始に失敗しました'
+        )
+      end
+    end
+  end
+
+  # 仕組みはビルドのポーリングと同じ(schedule_build_poll参照)。
+  def schedule_platform_poll
+    JS.global.setTimeout(3000) { refresh_platform_status }
+  end
+
+  def refresh_platform_status
+    Funicular::HTTP.get('/api/platform') do |response|
+      next unless response.ok
+
+      data = response.data || {}
+      status = value_of(data, 'status').to_s
+      log = value_of(data, 'log').to_s
+      log_truncated = truthy?(value_of(data, 'log_truncated'))
+      still_running = status == 'running'
+
+      patch(
+        platform_status: status,
+        platform_log: log,
+        platform_log_truncated: log_truncated,
+        platform_building: still_running
+      )
+
+      schedule_platform_poll if still_running
     end
   end
 

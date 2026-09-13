@@ -73,24 +73,37 @@ Rubyプロジェクトの中で、Ruby(`.rb`)とC(`.c` `.h`)のソースコー�
 - `POST /api/file` — `{path, content}` を受け取り、既存ファイルを上書き保存する
   (新規作成は不可。`ALLOWED_EXTENSIONS` にないファイルや `project/` 外は拒否)
 - `safe_path` ヘルパーでパストラバーサル対策済み
-- `GET /api/build` — R2P2-ESP32 のビルド状態(`idle`/`running`/`success`/`failed`)とログを返す。
-  UI からのポーリング用。ログは末尾 `BUILD_LOG_TAIL_LIMIT`(8,000文字)のみを返し、
-  切り詰めた場合は `log_truncated: true` を含める
-  (ブラウザ内のPicoRuby.wasmで全量(100KB超になりうる)をJSONパース/描画すると
-  数秒〜十秒近くかかり、「反応がない」ように見えてしまう問題への対処)
-- `POST /api/build` — `R2P2_ESP32_ROOT`(`../R2P2-ESP32`、Docker内では `/R2P2-ESP32`)で
-  `idf.py build` をバックグラウンドスレッドで起動する。実行中に重ねて叩くと 409
-  - `idf.py` は ESP-IDF の `export.sh` を読み込んだシェルでないと使えないため、
-    実行コマンド内で `$IDF_PATH/export.sh` を明示的に source してから呼んでいる。
-    Dockerのentrypoint(`R2P2-ESP32/docker/Dockerfile`)は起動時に一度export済みだが、
-    `docker exec` 等で入った場合はexportされていないことがあり、それに頼らない実装にした
-  - 状態は `BUILD_MUTEX` + `BUILD_STATE` のプロセス内グローバル変数で保持する簡易実装。
-    同時に1本しか走らせない前提で、複数人が同時にビルドを叩く運用は想定していない
+- `GET /api/build` / `POST /api/build` — R2P2-ESP32 のビルド(`idf.py build`)
+- `GET /api/platform` / `POST /api/platform` — プラットフォーム(ターゲットチップ)
+  セットアップ(`rake setup_#{platform}`)。`platform` は
+  `PLATFORM_TARGETS`(`esp32` `esp32c3` `esp32c6` `esp32h2` `esp32p4` `esp32s3`。
+  `R2P2-ESP32/rakelib/setup.rake` 参照)にあるものだけ許可
+  (コマンドインジェクション対策とrakeタスク名の妥当性確認を兼ねる)
+  - `setup_esp32xxx` は `deep_clean` + `setup`(mrubyの再ビルド) +
+    `idf.py set-target` という重い処理の直列実行なので、実行に数分かかる
 
-UI側(`app/funicular/ruby/components/editor_app.rb`)はビルド中、
-`JS.global.setTimeout(3000) { refresh_build_status }` で3秒おきに自動的にログを
+この2つはどちらも同じ形の非同期ジョブ(GETでポーリング、POSTで開始、実行中の
+POSTは409)なので、共通処理を `BackgroundJob` クラス(`app.rb`)に抽出してある。
+`BUILD_JOB` / `PLATFORM_JOB` という2つのインスタンスがそれぞれの状態
+(`idle`/`running`/`success`/`failed`、ログ)を持つ。ログは末尾
+`BackgroundJob::LOG_TAIL_LIMIT`(8,000文字)のみをレスポンスに含め、
+切り詰めた場合は `log_truncated: true` を付ける
+(ブラウザ内のPicoRuby.wasmで全量(100KB超になりうる)をJSONパース/描画すると
+数秒〜十秒近くかかり、「反応がない」ように見えてしまう問題への対処)。
+`idf.py` / `rake` はESP-IDFの `export.sh` を読み込んだシェルでないと使えないため、
+両ジョブとも実行コマンドは `r2p2_shell_command` ヘルパーで
+`$IDF_PATH/export.sh` を明示的にsourceしてから組み立てている
+(Dockerのentrypoint(`R2P2-ESP32/docker/Dockerfile`)は起動時に一度export済みだが、
+`docker exec` 等で入った場合はexportされていないことがあり、それに頼らない実装にした)。
+
+UI側(`app/funicular/ruby/components/editor_app.rb`)は実行中、
+`JS.global.setTimeout(3000) { refresh_xxx_status }` で3秒おきに自動的にログを
 取りに行く(runningでなくなったら止まる)。「ログを更新」ボタンはこれとは別に、
 すぐ最新状態を見たいときの手動トリガーとして残してある。
+ビルドパネル(`build_panel.rb`)とプラットフォームパネル(`platform_panel.rb`)は
+表示ロジックがほぼ同じ(ステータスラベル・ログ切り詰め表示・自動ポーリング)だが、
+まだ2つ書いているだけの重複度なので共通化はしていない。3つ目の非同期ジョブUIが
+必要になったら抽象化を検討する。
 
 **ここで踏んだ罠**: PicoRuby.wasmの `JS::Object#setTimeout` は Ruby標準の
 `Kernel#sleep` 的な感覚で `JS.global.setTimeout(callback_proc, delay_ms)` のように
@@ -132,6 +145,15 @@ READMEにも記載しているが、Claude Codeで次に着手する際の候補
 - **対応拡張子が `.rb` `.c` `.h` のみ**: 増やす場合は `app.rb` の `ALLOWED_EXTENSIONS`、
   `views/index.erb` のPrismコンポーネント読み込み、`editor.js` の `languageFor` /
   `iconFor` の3箇所を対応させる必要がある
+- **実機への書き込み(flash)が未実装**: プラットフォーム選択+セットアップ
+  (`POST /api/platform`)までは実装済みだが、ビルド済みイメージをUSB接続した
+  ESP32に書き込む機能(`R2P2-ESP32/rakelib/flash.rake` の `flash` タスク相当)は
+  まだない。公式の [R2P2-ESP32-installer](https://picoruby.org/R2P2-ESP32-installer/)
+  はブラウザのWeb Serial API(ESP Web Tools)で直接USBに書き込む方式だが、
+  今のこのプロジェクトのアーキテクチャ(サーバ側=Dockerコンテナでrake/idf.pyを実行)
+  で同じことをするには、コンテナにUSBシリアルデバイスを渡す
+  (`docker run --device /dev/ttyUSB0` 等、`bin/dev` の変更が要る)か、
+  Web Serial API側に倒すか、設計判断が必要
 
 ## 開発環境まわりの注意点
 
