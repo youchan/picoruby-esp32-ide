@@ -34,6 +34,8 @@ class EditorApp < Funicular::Component
       build_log: '',
       build_log_truncated: false,
       building: false,
+      build_vm: '',
+      build_usb_console: false,
       platform_status: 'idle',
       platform_log: '',
       platform_log_truncated: false,
@@ -108,8 +110,12 @@ class EditorApp < Funicular::Component
           build_log: state[:build_log],
           build_log_truncated: state[:build_log_truncated],
           building: state[:building],
+          selected_vm: state[:build_vm],
+          usb_console: state[:build_usb_console],
           on_build: -> { start_build },
-          on_refresh: -> { refresh_build_status }
+          on_refresh: -> { refresh_build_status },
+          on_vm_change: ->(vm) { patch(build_vm: vm) },
+          on_usb_console_change: ->(enabled) { patch(build_usb_console: enabled) }
         )
 
         component(PlatformPanel,
@@ -284,7 +290,8 @@ class EditorApp < Funicular::Component
 
     patch(building: true, build_status: 'running', build_log: '')
 
-    Funicular::HTTP.post('/api/build', {}) do |response|
+    payload = { vm: state[:build_vm], usb_console: state[:build_usb_console] }
+    Funicular::HTTP.post('/api/build', payload) do |response|
       if response.ok
         schedule_build_poll
       else

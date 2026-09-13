@@ -74,6 +74,35 @@ Rubyプロジェクトの中で、Ruby(`.rb`)とC(`.c` `.h`)のソースコー�
   (新規作成は不可。`ALLOWED_EXTENSIONS` にないファイルや `project/` 外は拒否)
 - `safe_path` ヘルパーでパストラバーサル対策済み
 - `GET /api/build` / `POST /api/build` — R2P2-ESP32 のビルド(`idf.py build`)
+  - `POST`のbodyで `vm`(`"femtoruby"`|`"picoruby"`、`BUILD_VM_FLAGS`で
+    `-DPICORB_VM=mrubyc`|`mruby`に変換)と `usb_console`(true/false)を選べる。
+    公式の[R2P2-ESP32-installer](https://github.com/picoruby/R2P2-ESP32-installer)は
+    CIで全組み合わせ(VM×usb_console×チップ)を事前ビルドしてGitHub Releaseで配布し、
+    ブラウザ側でファイル名をパースして選ばせる方式だが、こちらは「今コンテナ内で
+    1本だけビルドする」設計なので、オプションはビルド開始時にリクエストで渡す形にした
+  - `usb_console` は `R2P2-ESP32/sdkconfigs/usb_console`
+    (`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y`。外部USB-UART変換チップを持たない
+    ボード向け)を `SDKCONFIG_DEFAULTS` にマージする。ESP-IDFは
+    `SDKCONFIG_DEFAULTS` を **`sdkconfig` ファイルが存在しないときしか読まない**ため、
+    設定を反映させるには `sdkconfig` を消してからビルドし直す必要がある
+    (`rake deep_clean`/`idf.py fullclean` でも `sdkconfig` 自体は消えない。
+    README.md「If you change SDKCONFIG_DEFAULTS, delete the sdkconfig file and
+    rebuild from scratch」参照)
+  - **踏んだ罠**: 最初「`usb_console: true`のときだけ`sdkconfig`を消す」という
+    実装にしたら、一度trueにした後falseに戻しても`sdkconfig`にUSB Console設定が
+    残ったままになるバグを作ってしまった(実機で試すまで気づかなかった類の話ではなく、
+    このセッション内でAPIを叩いて`grep CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG sdkconfig`
+    で確認して発覚した)。正しくは `sdkconfig_has_usb_console?` ヘルパーで
+    **今の`sdkconfig`の実際の中身**を見て、リクエストされた値と食い違うときだけ
+    `rm -f sdkconfig && SDKCONFIG_DEFAULTS=... idf.py build` する。一致していれば
+    従来通りの高速な差分ビルドのまま(オプション未指定の通常ビルドが遅くならない)
+  - VM(`-DPICORB_VM=`)の切り替えは`sdkconfig`と無関係(CMakeのキャッシュ変数)なので
+    上記のクリーン処理は不要。ビルドログの早い段階に出る
+    `-- PICORB_VM is set to: mrubyc` のような行は、キャッシュがまだ更新される前の
+    表示に見えることがあるので、本当に反映されたかは
+    `build/CMakeCache.txt` の `PICORB_VM:STRING=...` や、
+    `components/picoruby-esp32/picoruby/build/` 配下に
+    `esp32-{femtoruby,picoruby}` のディレクトリが増えているかで確認するのが確実
 - `GET /api/platform` / `POST /api/platform` — プラットフォーム(ターゲットチップ)
   セットアップ(`rake setup_#{platform}`)。`platform` は
   `PLATFORM_TARGETS`(`esp32` `esp32c3` `esp32c6` `esp32h2` `esp32p4` `esp32s3`。

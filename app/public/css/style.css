@@ -308,6 +308,32 @@ button.build-refresh:hover:not(:disabled) {
 .build-status.success { color: var(--ok); }
 .build-status.failed { color: var(--error); }
 
+.build-options {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.build-option {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.build-option select {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 12px;
+}
+
 .build-log {
   margin: 0;
   padding: 12px 16px;

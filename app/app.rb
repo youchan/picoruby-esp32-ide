@@ -274,12 +274,60 @@ get "/api/build" do
   BUILD_JOB.to_response_json
 end
 
+# idf.py build -DPICORB_VM=xxx に渡すフラグ(R2P2-ESP32/Rakefile の PICORB_VMS と同じ対応)。
+BUILD_VM_FLAGS = { "femtoruby" => "mrubyc", "picoruby" => "mruby" }.freeze
+
+# 外部USB-UART変換チップを持たないボード向けの設定フラグメント
+# (R2P2-ESP32/sdkconfigs/usb_console、README.md「Hardware-specific Configuration」参照)。
+USB_CONSOLE_SDKCONFIG_DEFAULTS = "sdkconfig.defaults;sdkconfigs/usb_console"
+
+# 現在の sdkconfig が USB Console設定でビルドされているかどうか。
+# sdkconfigが無い(セットアップ直後、または一度もビルドしていない)場合はfalse扱い。
+def sdkconfig_has_usb_console?
+  sdkconfig_path = File.join(R2P2_ESP32_ROOT, "sdkconfig")
+  return false unless File.file?(sdkconfig_path)
+
+  File.foreach(sdkconfig_path).any? { |line| line.start_with?("CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y") }
+end
+
 # R2P2-ESP32 のビルド(idf.py build)をバックグラウンドで開始する。
 # 実行中に重ねて叩かれた場合は 409 を返す(同時に複数走らせない)。
+#
+# body(JSON、両方省略可):
+#   vm: "femtoruby" | "picoruby" — 省略時は現在のCMake設定のデフォルトVMのまま
+#   usb_console: true | false    — 省略時は現在のsdkconfigの設定のまま
 post "/api/build" do
   content_type :json
 
-  started = BUILD_JOB.start(r2p2_shell_command("idf.py build"))
+  payload =
+    begin
+      body = request.body.read
+      body.empty? ? {} : JSON.parse(body)
+    rescue JSON::ParserError
+      json_error(400, "invalid json body")
+    end
+
+  vm = payload["vm"].to_s.empty? ? nil : payload["vm"]
+  json_error(400, "invalid vm") if vm && !BUILD_VM_FLAGS.key?(vm)
+  usb_console = payload["usb_console"] == true
+
+  build_cmd = +"idf.py build"
+  build_cmd << " -DPICORB_VM=#{BUILD_VM_FLAGS[vm]}" if vm
+
+  full_cmd =
+    if usb_console != sdkconfig_has_usb_console?
+      # SDKCONFIG_DEFAULTS は sdkconfig ファイルが無いときにしか読まれない仕組みなので、
+      # 現在の設定と要求された設定が食い違うときだけ sdkconfig を消してビルドし直す
+      # (README.md「If you change SDKCONFIG_DEFAULTS, delete the sdkconfig file and
+      # rebuild from scratch」参照。fullclean/deep_cleanでも消えないので明示的に消す)。
+      # 値が変わらない限りはこのクリーンビルドを避け、従来通りの差分ビルドのままにする。
+      sdkconfig_defaults = usb_console ? USB_CONSOLE_SDKCONFIG_DEFAULTS : "sdkconfig.defaults"
+      "rm -f sdkconfig && SDKCONFIG_DEFAULTS=#{Shellwords.escape(sdkconfig_defaults)} #{build_cmd}"
+    else
+      build_cmd
+    end
+
+  started = BUILD_JOB.start(r2p2_shell_command(full_cmd))
   json_error(409, "build already running") unless started
 
   { status: "ok" }.to_json
