@@ -6,9 +6,6 @@ require "shellwords"
 set :public_folder, File.join(__dir__, "public")
 set :views, File.join(__dir__, "views")
 
-# 開発中(bin/dev、RACK_ENV=development)は app/ をbind mountして頻繁にファイルを
-# 差し替えるため、ブラウザキャッシュのせいで更新が反映されずハマる方が実害が大きい。
-# 本番相当(Dockerfileの素のCMD起動、RACK_ENV=production)では逆にキャッシュさせたい。
 if settings.development?
   set :static_cache_control, [:no_store, :no_cache, :must_revalidate]
 
@@ -23,118 +20,31 @@ else
   end
 end
 
-# 編集対象として公開するプロジェクト群のルートディレクトリ。
-# 直下の各ディレクトリ(例: projects/sample)がそれぞれ独立した編集対象になる。
 PROJECTS_ROOT = File.expand_path("../projects", __dir__)
-
-# Funicular(PicoRuby.wasm)版フロントエンドの置き場所
 FUNICULAR_ROOT = File.expand_path("funicular", __dir__)
-
-# ビルド対象の R2P2-ESP32 プロジェクトルート。
-# Dockerfile では /R2P2-ESP32 に、ローカル開発では ../R2P2-ESP32 に配置される
-# (projects/ と同じ __dir__ 相対の解決方法に合わせてある)。
 R2P2_ESP32_ROOT = File.expand_path("../R2P2-ESP32", __dir__)
 
-# 編集を許可する拡張子(Ruby / C)
 ALLOWED_EXTENSIONS = %w[.rb .c .h].freeze
-
-# setup_esp32xxx タスクが存在するターゲット一覧(R2P2-ESP32/rakelib/setup.rake参照)。
-# rakeタスク名の組み立てに使うため、ここに無い値は拒否する(コマンドインジェクション対策)。
 PLATFORM_TARGETS = %w[esp32 esp32c3 esp32c6 esp32h2 esp32p4 esp32s3].freeze
-
-# サーバ内で1本しか同時実行しないバックグラウンドジョブの実行状態を管理する。
-# ビルド(idf.py build)とプラットフォームセットアップ(rake setup_xxx)の両方で使う、
-# 複数人が同時に叩く運用は想定していない簡易な共有ステート。
-class BackgroundJob
-  # ブラウザ(PicoRuby.wasm)側でのJSONパース/描画が重くなりすぎないよう、
-  # API経由で返すログは末尾のみに切り詰める。全量は @state[:log] に残る。
-  LOG_TAIL_LIMIT = 8_000
-
-  def initialize
-    @mutex = Mutex.new
-    @state = { status: "idle", log: "", started_at: nil, finished_at: nil }
-  end
-
-  # 実行中でなければバックグラウンドスレッドでcmdを開始してtrueを返す。
-  # 実行中ならなにもせずfalseを返す(呼び出し側で409にする)。
-  def start(cmd)
-    started = @mutex.synchronize do
-      break false if @state[:status] == "running"
-
-      @state[:status] = "running"
-      @state[:log] = ""
-      @state[:started_at] = Time.now.to_i
-      @state[:finished_at] = nil
-      true
-    end
-
-    Thread.new { run(cmd) } if started
-    started
-  end
-
-  def to_response_json
-    @mutex.synchronize do
-      full_log = @state[:log]
-      truncated = full_log.length > LOG_TAIL_LIMIT
-
-      {
-        status: @state[:status],
-        log: truncated ? full_log[-LOG_TAIL_LIMIT..-1] : full_log,
-        log_truncated: truncated,
-        started_at: @state[:started_at],
-        finished_at: @state[:finished_at]
-      }.to_json
-    end
-  end
-
-  private
-
-  def run(cmd)
-    Open3.popen2e("bash", "-c", cmd) do |stdin, stdout_and_stderr, wait_thread|
-      stdin.close
-      stdout_and_stderr.each_line do |line|
-        @mutex.synchronize { @state[:log] << line }
-      end
-
-      success = wait_thread.value.success?
-      @mutex.synchronize do
-        @state[:status] = success ? "success" : "failed"
-        @state[:finished_at] = Time.now.to_i
-      end
-    end
-  rescue StandardError => e
-    @mutex.synchronize do
-      @state[:status] = "failed"
-      @state[:log] << "\n[#{e.class}] #{e.message}\n"
-      @state[:finished_at] = Time.now.to_i
-    end
-  end
-end
 
 BUILD_JOB = BackgroundJob.new
 PLATFORM_JOB = BackgroundJob.new
 
 helpers do
-  # PROJECTS_ROOT 直下にあるディレクトリ名(= プロジェクト名)の一覧
   def available_projects
     Dir.children(PROJECTS_ROOT).select { |name| File.directory?(File.join(PROJECTS_ROOT, name)) }.sort
   end
 
   # プロジェクト名をパストラバーサル対策しつつ絶対パスに変換する。
-  # 未指定時は available_projects の先頭を既定として使う
-  # (project を指定しない古いクライアントとの互換性のため)。
   # 戻り値は [プロジェクト名, 絶対パス] のペア。
   def project_root(name)
-    name = name.to_s.empty? ? nil : name.to_s
-    name ||= available_projects.first
-    raise ArgumentError, "no project available" if name.nil?
     raise ArgumentError, "invalid project" if name.include?(File::SEPARATOR) || name.include?("..")
 
     full = File.expand_path(File.join(PROJECTS_ROOT, name))
     root_with_sep = PROJECTS_ROOT + File::SEPARATOR
     raise ArgumentError, "invalid project" unless full.start_with?(root_with_sep) && File.directory?(full)
 
-    [name, full]
+    full
   end
 
   # path traversal (../ などによる範囲外アクセス) を防ぎつつ絶対パスに変換する
@@ -152,17 +62,12 @@ helpers do
   end
 end
 
-# エディタ画面(Funicular / PicoRuby.wasm 版)
-# send_file だと Last-Modified を自動付与し、ブラウザが If-Modified-Since で
-# 再検証してキャッシュ済みの古い本文を使い続けることがあった(development環境で
-# no-store を指定していても発生した)ため、File.read で素朴に返す。
 get "/" do
   content_type :html
   File.read(File.join(FUNICULAR_ROOT, "index.html"))
 end
 
 # Funicular アプリの Ruby ソース。
-# <script type="text/ruby" src="/ruby/..."> から読み込まれる。
 get %r{/ruby/(.+\.rb)} do |rel|
   full = File.expand_path(File.join(FUNICULAR_ROOT, "ruby", rel))
   root_with_sep = File.join(FUNICULAR_ROOT, "ruby") + File::SEPARATOR
@@ -176,6 +81,7 @@ end
 
 # 旧エディタ画面(textarea + Prism を素の JavaScript で書いた版)。
 # Funicular 版と挙動を比較したいとき用に残してある。
+# TODO index.erb を '/' で使うようにする
 get "/legacy" do
   erb :index
 end
@@ -191,7 +97,7 @@ get "/api/files" do
   content_type :json
 
   begin
-    _name, root = project_root(params[:project])
+    root = project_root(params[:project])
   rescue ArgumentError
     json_error(400, "invalid project")
   end
@@ -213,7 +119,7 @@ get "/api/file" do
   json_error(400, "path is required") if rel.nil? || rel.empty?
 
   begin
-    _name, root = project_root(params[:project])
+    root = project_root(params[:project])
     full = safe_path(root, rel)
   rescue ArgumentError
     json_error(400, "invalid path")
@@ -243,7 +149,7 @@ post "/api/file" do
   json_error(400, "content is required") if content.nil?
 
   begin
-    _name, root = project_root(payload["project"])
+    root = project_root(payload["project"])
     full = safe_path(root, rel)
   rescue ArgumentError
     json_error(400, "invalid path")
