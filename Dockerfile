@@ -13,17 +13,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libffi-dev \
     && rm -rf /var/lib/apt/lists/*
 
-RUN git clone https://github.com/rbenv/rbenv.git "${RBENV_ROOT}"
-RUN git clone https://github.com/rbenv/ruby-build.git "$(rbenv root)"/plugins/ruby-build
+RUN git clone --depth 1 https://github.com/rbenv/rbenv.git "${RBENV_ROOT}"
+RUN git clone --depth 1 https://github.com/rbenv/ruby-build.git "$(rbenv root)"/plugins/ruby-build
 RUN rbenv init
 
 RUN rbenv install 4.0.6
 RUN rbenv global 4.0.6
 
-COPY R2P2-ESP32/ /R2P2-ESP32
+RUN git clone --depth 1 https://github.com/picoruby/R2P2-ESP32.git
 
 WORKDIR /R2P2-ESP32
-RUN . "${IDF_PATH}/export.sh" && rake setup_esp32
+RUN git submodule update --init --recursive
+RUN . "${IDF_PATH}/export.sh"
 
 WORKDIR /root
 

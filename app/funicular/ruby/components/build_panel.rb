@@ -26,7 +26,6 @@ class BuildPanel < Funicular::Component
     div(class: 'build-panel') do
       div(class: 'build-panel-header') do
         h1 { 'R2P2-ESP32 Build' }
-        render_build_button
         render_refresh_button
         span(class: "build-status #{props[:build_status]}") { status_label }
       end
@@ -36,12 +35,6 @@ class BuildPanel < Funicular::Component
       end
       tag(:pre, class: 'build-log') { build_log_text }
     end
-  end
-
-  def handle_build(event)
-    event.preventDefault
-    on_build = props[:on_build]
-    on_build.call if on_build
   end
 
   def handle_refresh(event)
@@ -65,14 +58,6 @@ class BuildPanel < Funicular::Component
   end
 
   private
-
-  def render_build_button
-    if props[:building]
-      button(class: 'build', disabled: true) { 'ビルド中…' }
-    else
-      button(class: 'build', onclick: :handle_build) { 'ビルド開始' }
-    end
-  end
 
   def render_refresh_button
     button(class: 'build-refresh', onclick: :handle_refresh) { 'ログを更新' }

@@ -21,11 +21,9 @@ class PlatformPanel < Funicular::Component
     div(class: 'platform-panel') do
       div(class: 'platform-panel-header') do
         h1 { 'Platform Setup' }
+        span(class: 'platform-target') { props[:selected_platform] || '未選択' }
         render_refresh_button
         span(class: "build-status #{props[:platform_status]}") { status_label }
-      end
-      div(class: 'platform-buttons') do
-        PLATFORMS.each { |name| render_platform_button(name) }
       end
       tag(:pre, class: 'build-log') { log_text }
     end
@@ -38,20 +36,6 @@ class PlatformPanel < Funicular::Component
   end
 
   private
-
-  def render_platform_button(name)
-    classes = (name == props[:selected_platform]) ? 'platform-btn active' : 'platform-btn'
-    if props[:building]
-      button(class: classes, disabled: true) { name }
-    else
-      button(class: classes, onclick: select_handler(name)) { name }
-    end
-  end
-
-  # render時点のnameをlambdaに閉じ込めて渡す(FileList/ProjectListと同じパターン)。
-  def select_handler(name)
-    -> { props[:on_select].call(name) }
-  end
 
   def render_refresh_button
     button(class: 'build-refresh', onclick: :handle_refresh) { 'ログを更新' }

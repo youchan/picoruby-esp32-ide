@@ -25,7 +25,100 @@ html, body {
 
 .app {
   display: flex;
+  flex-direction: column;
   height: 100vh;
+}
+
+.app-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.menu-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 44px;
+  flex-shrink: 0;
+  padding: 0 16px;
+  background: var(--bg-toolbar);
+  border-bottom: 1px solid var(--border);
+}
+
+.menu-bar-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+  white-space: nowrap;
+}
+
+.menu-bar-chip {
+  padding: 4px 10px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.menu-bar-chip.project {
+  background: #3c3c3c;
+  color: var(--text);
+  border-color: transparent;
+}
+
+.menu-bar-spacer {
+  flex: 1;
+}
+
+.menu-bar-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: 12px;
+  font-size: 12px;
+  white-space: nowrap;
+  background: #3c3c3c;
+  color: var(--text-dim);
+}
+
+.menu-bar-status::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.menu-bar-status.running {
+  background: rgba(0, 122, 204, 0.15);
+  color: var(--accent);
+}
+
+.menu-bar-status.success {
+  background: rgba(76, 175, 80, 0.15);
+  color: var(--ok);
+}
+
+.menu-bar-status.failed {
+  background: rgba(244, 67, 54, 0.15);
+  color: var(--error);
+}
+
+.menu-bar select {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+.menu-bar-hint {
+  font-size: 11px;
+  color: var(--text-dim);
 }
 
 .sidebar {
@@ -372,28 +465,9 @@ button.build-refresh:hover:not(:disabled) {
   flex: 1;
 }
 
-.platform-buttons {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  padding: 8px 16px;
-  border-bottom: 1px solid var(--border);
-}
-
-button.platform-btn {
-  background: #555;
-}
-
-button.platform-btn:hover:not(:disabled) {
-  background: #6a6a6a;
-}
-
-button.platform-btn.active {
-  background: var(--accent);
-}
-
-button.platform-btn.active:hover:not(:disabled) {
-  background: var(--accent-hover);
+.platform-target {
+  font-size: 12px;
+  color: var(--text-dim);
 }
 
 .install-panel {
