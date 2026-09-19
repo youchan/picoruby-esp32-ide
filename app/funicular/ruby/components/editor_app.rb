@@ -36,11 +36,13 @@ class EditorApp < Funicular::Component
       building: false,
       build_vm: '',
       build_usb_console: false,
+      build_dialog_open: false,
       platform_status: 'idle',
       platform_log: '',
       platform_log_truncated: false,
       platform_building: false,
-      selected_platform: nil
+      selected_platform: nil,
+      log_tab: 'build'
     }
   end
 
@@ -62,73 +64,87 @@ class EditorApp < Funicular::Component
 
   def render
     div(class: 'app') do
-      div(class: 'sidebar') do
-        component(ProjectList,
-          projects: state[:projects],
-          loading: state[:loading_projects],
-          current_project: state[:current_project],
-          on_select: ->(name) { select_project(name) }
-        )
+      # 最上部のメニュー/グローバルステータスバー。プロジェクト切り替えなど
+      # 操作そのものは左のツリーに残し、ここは「今の状態」を表示するだけに徹する。
+      component(MenuBar,
+        current_project: state[:current_project],
+        selected_platform: state[:selected_platform],
+        build_status: state[:build_status],
+        building: state[:building],
+        platform_building: state[:platform_building],
+        on_build: -> { patch(build_dialog_open: true) },
+        on_platform_select: ->(name) { start_platform_setup(name) }
+      )
 
-        component(FileList,
-          files: state[:files],
-          loading: state[:loading_files],
-          current_path: state[:current_path],
-          on_select: ->(path) { open_file(path) }
+      if state[:build_dialog_open]
+        component(BuildDialog,
+          selected_vm: state[:build_vm],
+          usb_console: state[:build_usb_console],
+          on_vm_change: ->(vm) { patch(build_vm: vm) },
+          on_usb_console_change: ->(enabled) { patch(build_usb_console: enabled) },
+          on_confirm: -> { patch(build_dialog_open: false); start_build },
+          on_cancel: -> { patch(build_dialog_open: false) }
         )
       end
 
-      div(class: 'editor-area') do
-        component(Toolbar,
-          current_path: state[:current_path],
-          dirty: dirty?,
-          status: state[:status],
-          status_kind: state[:status_kind],
-          on_save: -> { save_file }
-        )
+      div(class: 'app-body') do
+        div(class: 'sidebar') do
+          component(ProjectList,
+            projects: state[:projects],
+            loading: state[:loading_projects],
+            current_project: state[:current_project],
+            on_select: ->(name) { select_project(name) }
+          )
 
-        div(class: 'editor-wrapper') do
-          # 行番号は innerHTML を使わず、そのまま VDOM で描画する
-          div(class: 'line-numbers', ref: :lines) do
-            (1..line_count).each do |n|
-              div { n.to_s }
-            end
-          end
-
-          # スクロールする要素をこのコンテナ一箇所に集約し、
-          # ハイライト層と textarea は CSS Grid で同じセルに重ねる(style.css 参照)
-          div(class: 'editor-scroll-area', ref: :scroll, onscroll: :handle_scroll) do
-            tag(:pre, class: 'highlight-layer') do
-              tag(:code, ref: :highlight)
-            end
-            render_textarea
-          end
+          component(FileList,
+            files: state[:files],
+            loading: state[:loading_files],
+            current_path: state[:current_path],
+            on_select: ->(path) { open_file(path) }
+          )
         end
 
-        component(BuildPanel,
-          build_status: state[:build_status],
-          build_log: state[:build_log],
-          build_log_truncated: state[:build_log_truncated],
-          building: state[:building],
-          selected_vm: state[:build_vm],
-          usb_console: state[:build_usb_console],
-          on_build: -> { start_build },
-          on_refresh: -> { refresh_build_status },
-          on_vm_change: ->(vm) { patch(build_vm: vm) },
-          on_usb_console_change: ->(enabled) { patch(build_usb_console: enabled) }
-        )
+        div(class: 'editor-area') do
+          component(Toolbar,
+            current_path: state[:current_path],
+            dirty: dirty?,
+            status: state[:status],
+            status_kind: state[:status_kind],
+            on_save: -> { save_file }
+          )
 
-        component(PlatformPanel,
-          platform_status: state[:platform_status],
-          platform_log: state[:platform_log],
-          platform_log_truncated: state[:platform_log_truncated],
-          building: state[:platform_building],
-          selected_platform: state[:selected_platform],
-          on_select: ->(name) { start_platform_setup(name) },
-          on_refresh: -> { refresh_platform_status }
-        )
+          div(class: 'editor-wrapper') do
+            # 行番号は innerHTML を使わず、そのまま VDOM で描画する
+            div(class: 'line-numbers', ref: :lines) do
+              (1..line_count).each do |n|
+                div { n.to_s }
+              end
+            end
 
-        component(InstallPanel)
+            # スクロールする要素をこのコンテナ一箇所に集約し、
+            # ハイライト層と textarea は CSS Grid で同じセルに重ねる(style.css 参照)
+            div(class: 'editor-scroll-area', ref: :scroll, onscroll: :handle_scroll) do
+              tag(:pre, class: 'highlight-layer') do
+                tag(:code, ref: :highlight)
+              end
+              render_textarea
+            end
+          end
+
+          component(LogPanel,
+            active_tab: state[:log_tab],
+            build_status: state[:build_status],
+            build_log: state[:build_log],
+            build_log_truncated: state[:build_log_truncated],
+            platform_status: state[:platform_status],
+            platform_log: state[:platform_log],
+            platform_log_truncated: state[:platform_log_truncated],
+            selected_platform: state[:selected_platform],
+            on_tab_change: ->(tab) { patch(log_tab: tab) },
+            on_build_refresh: -> { refresh_build_status },
+            on_platform_refresh: -> { refresh_platform_status }
+          )
+        end
       end
     end
   end

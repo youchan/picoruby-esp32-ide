@@ -25,7 +25,100 @@ html, body {
 
 .app {
   display: flex;
+  flex-direction: column;
   height: 100vh;
+}
+
+.app-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.menu-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 44px;
+  flex-shrink: 0;
+  padding: 0 16px;
+  background: var(--bg-toolbar);
+  border-bottom: 1px solid var(--border);
+}
+
+.menu-bar-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+  white-space: nowrap;
+}
+
+.menu-bar-chip {
+  padding: 4px 10px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.menu-bar-chip.project {
+  background: #3c3c3c;
+  color: var(--text);
+  border-color: transparent;
+}
+
+.menu-bar-spacer {
+  flex: 1;
+}
+
+.menu-bar-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: 12px;
+  font-size: 12px;
+  white-space: nowrap;
+  background: #3c3c3c;
+  color: var(--text-dim);
+}
+
+.menu-bar-status::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.menu-bar-status.running {
+  background: rgba(0, 122, 204, 0.15);
+  color: var(--accent);
+}
+
+.menu-bar-status.success {
+  background: rgba(76, 175, 80, 0.15);
+  color: var(--ok);
+}
+
+.menu-bar-status.failed {
+  background: rgba(244, 67, 54, 0.15);
+  color: var(--error);
+}
+
+.menu-bar select {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+.menu-bar-hint {
+  font-size: 11px;
+  color: var(--text-dim);
 }
 
 .sidebar {
@@ -265,7 +358,7 @@ button:disabled {
   cursor: default;
 }
 
-.build-panel {
+.log-panel {
   flex-shrink: 0;
   max-height: 220px;
   display: flex;
@@ -274,7 +367,7 @@ button:disabled {
   background: var(--bg-toolbar);
 }
 
-.build-panel-header {
+.log-panel-header {
   display: flex;
   align-items: center;
   gap: 12px;
@@ -282,13 +375,29 @@ button:disabled {
   border-bottom: 1px solid var(--border);
 }
 
-.build-panel-header h1 {
+.log-panel-spacer {
+  flex: 1;
+}
+
+button.log-panel-tab {
+  background: transparent;
+  color: var(--text-dim);
+  padding: 4px 2px;
   font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: var(--text-dim);
-  margin: 0;
-  flex: 1;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+}
+
+button.log-panel-tab:hover:not(:disabled) {
+  background: transparent;
+  color: var(--text);
+}
+
+button.log-panel-tab.active {
+  color: #fff;
+  border-bottom-color: var(--accent);
 }
 
 button.build-refresh {
@@ -346,54 +455,55 @@ button.build-refresh:hover:not(:disabled) {
   color: var(--text);
 }
 
-.platform-panel {
-  flex-shrink: 0;
-  max-height: 220px;
-  display: flex;
-  flex-direction: column;
-  border-top: 1px solid var(--border);
-  background: var(--bg-toolbar);
-}
-
-.platform-panel-header {
+.dialog-overlay {
+  position: fixed;
+  inset: 0;
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 8px 16px;
-  border-bottom: 1px solid var(--border);
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 10;
 }
 
-.platform-panel-header h1 {
-  font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--text-dim);
+.dialog {
+  min-width: 320px;
+  background: var(--bg-toolbar);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+.dialog h2 {
+  font-size: 14px;
   margin: 0;
-  flex: 1;
+  padding: 16px 16px 12px;
 }
 
-.platform-buttons {
+.build-dialog .build-options {
+  border-bottom: none;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.dialog-actions {
   display: flex;
-  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 8px;
-  padding: 8px 16px;
-  border-bottom: 1px solid var(--border);
+  padding: 12px 16px 16px;
 }
 
-button.platform-btn {
+button.dialog-cancel {
   background: #555;
 }
 
-button.platform-btn:hover:not(:disabled) {
+button.dialog-cancel:hover:not(:disabled) {
   background: #6a6a6a;
 }
 
-button.platform-btn.active {
-  background: var(--accent);
-}
-
-button.platform-btn.active:hover:not(:disabled) {
-  background: var(--accent-hover);
+.platform-target {
+  font-size: 12px;
+  color: var(--text-dim);
 }
 
 .install-panel {
