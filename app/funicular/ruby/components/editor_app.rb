@@ -64,14 +64,17 @@ class EditorApp < Funicular::Component
 
   def render
     div(class: 'app') do
-      # 最上部のメニュー/グローバルステータスバー。プロジェクト切り替えなど
-      # 操作そのものは左のツリーに残し、ここは「今の状態」を表示するだけに徹する。
+      # 最上部のメニュー/グローバルステータスバー。プロジェクト切り替えも
+      # ここのドロップダウンに集約している(サイドバーはファイル一覧専用)。
       component(MenuBar,
+        projects: state[:projects],
+        loading_projects: state[:loading_projects],
         current_project: state[:current_project],
         selected_platform: state[:selected_platform],
         build_status: state[:build_status],
         building: state[:building],
         platform_building: state[:platform_building],
+        on_project_select: ->(name) { select_project(name) },
         on_build: -> { patch(build_dialog_open: true) },
         on_platform_select: ->(name) { start_platform_setup(name) }
       )
@@ -89,13 +92,6 @@ class EditorApp < Funicular::Component
 
       div(class: 'app-body') do
         div(class: 'sidebar') do
-          component(ProjectList,
-            projects: state[:projects],
-            loading: state[:loading_projects],
-            current_project: state[:current_project],
-            on_select: ->(name) { select_project(name) }
-          )
-
           component(FileList,
             files: state[:files],
             loading: state[:loading_files],
@@ -211,7 +207,7 @@ class EditorApp < Funicular::Component
       if response.ok
         projects = response.data || []
         patch(projects: projects, loading_projects: false)
-        select_project(projects.first) if state[:current_project].nil? && !projects.empty?
+        select_project(projects.first.to_s) if state[:current_project].nil? && !projects.empty?
       else
         patch(
           projects: [],
@@ -306,7 +302,7 @@ class EditorApp < Funicular::Component
 
     patch(building: true, build_status: 'running', build_log: '')
 
-    payload = { vm: state[:build_vm], usb_console: state[:build_usb_console] }
+    payload = { project: state[:current_project], vm: state[:build_vm], usb_console: state[:build_usb_console] }
     Funicular::HTTP.post('/api/build', payload) do |response|
       if response.ok
         schedule_build_poll

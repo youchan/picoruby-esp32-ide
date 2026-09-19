@@ -53,21 +53,6 @@ html, body {
   white-space: nowrap;
 }
 
-.menu-bar-chip {
-  padding: 4px 10px;
-  border-radius: 5px;
-  border: 1px solid var(--border);
-  font-size: 12px;
-  color: var(--text-dim);
-  white-space: nowrap;
-}
-
-.menu-bar-chip.project {
-  background: #3c3c3c;
-  color: var(--text);
-  border-color: transparent;
-}
-
 .menu-bar-spacer {
   flex: 1;
 }
@@ -139,21 +124,13 @@ html, body {
   margin: 0;
 }
 
-.project-list-section {
-  border-bottom: 1px solid var(--border);
-  padding-bottom: 12px;
-  margin-bottom: 12px;
-}
-
-.file-list,
-.project-list {
+.file-list {
   list-style: none;
   margin: 0;
   padding: 0;
 }
 
-.file-list li,
-.project-list li {
+.file-list li {
   padding: 6px 16px;
   font-size: 13px;
   cursor: pointer;
@@ -165,29 +142,23 @@ html, body {
   gap: 6px;
 }
 
-.file-list li:hover,
-.project-list li:hover {
+.file-list li:hover {
   background: #2a2d2e;
 }
 
-.file-list li.active,
-.project-list li.active {
+.file-list li.active {
   background: #37373d;
   color: #fff;
 }
 
 .file-list li.loading,
-.file-list li.empty,
-.project-list li.loading,
-.project-list li.empty {
+.file-list li.empty {
   color: var(--text-dim);
   cursor: default;
 }
 
 .file-list li.loading:hover,
-.file-list li.empty:hover,
-.project-list li.loading:hover,
-.project-list li.empty:hover {
+.file-list li.empty:hover {
   background: none;
 }
 
@@ -485,6 +456,7 @@ button.build-refresh:hover:not(:disabled) {
   align-items: flex-start;
   gap: 12px;
 }
+
 
 .dialog-actions {
   display: flex;

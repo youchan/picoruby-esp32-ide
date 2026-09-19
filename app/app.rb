@@ -2,6 +2,7 @@ require "sinatra"
 require "json"
 require "open3"
 require "shellwords"
+require "fileutils"
 require_relative "background_job"
 
 set :public_folder, File.join(__dir__, "public")
@@ -25,8 +26,35 @@ PROJECTS_ROOT = File.expand_path("../projects", __dir__)
 FUNICULAR_ROOT = File.expand_path("funicular", __dir__)
 R2P2_ESP32_ROOT = File.expand_path("../R2P2-ESP32", __dir__)
 
-ALLOWED_EXTENSIONS = %w[.rb .c .h].freeze
+ALLOWED_EXTENSIONS = %w[.rb .c .h .rake].freeze
 PLATFORM_TARGETS = %w[esp32 esp32c3 esp32c6 esp32h2 esp32p4 esp32s3].freeze
+
+# 1プロジェクト = projects/<name>/ の中に app/・mrbgems/・build_config.rb を
+# まとめて持つディレクトリ、という単位にしてある(app/mrbgemsをprojects直下に
+# 並べて種別を自動判定する方式から変更。1つのアプリと、それが使う自作mrbgem群を
+# 1プロジェクトとして丸ごと持ち歩けるように)。
+APP_DIRNAME = "app"
+MRBGEMS_DIRNAME = "mrbgems"
+
+# プロジェクト固有のビルド設定。ユーザーが直接編集できる普通のファイルという位置づけ
+# (以前はGemsダイアログが生成する専用ファイルだったが、mrbgemがプロジェクトの中に
+# 物理的に入るようになったことで、追加するmrbgemを選ぶUIは不要になった)。
+BUILD_CONFIG_FILENAME = "build_config.rb"
+
+# ビルド時にPROJECT_BUILD_CONFIG経由でR2P2-ESP32へ実際に渡すファイル。
+# mrbgems/以下から自動生成した`conf.gem gemdir:`の並びの後ろに、プロジェクトの
+# build_config.rbの内容をそのまま連結したもの(ユーザーが書いたbuild_config.rb自体は
+# 書き換えない)。
+GENERATED_BUILD_CONFIG_FILENAME = ".build_config.generated.rb"
+
+# appプロジェクトのapp/以下を起動スクリプトとして実機で動かすための仕組み。
+# R2P2-ESP32はmain/CMakeLists.txtの`littlefs_create_partition_image`でR2P2-ESP32/storage/
+# 以下をそのままstorageパーティション(littlefs)のイメージにし、起動スクリプト
+# (components/picoruby-esp32/mrblib/main_task.rb)が起動のたびに
+# `/home/app.rb`(=storage/home/app.rb)を自動でloadする、というR2P2本来の仕組みが
+# 既にある。そのため main_task.rb 側の改造は不要で、ビルド直前にprojectのapp/以下を
+# storage/home/へまるごとコピーするだけでよい。
+STORAGE_HOME_DIR = File.join(R2P2_ESP32_ROOT, "storage", "home")
 
 BUILD_JOB = BackgroundJob.new
 PLATFORM_JOB = BackgroundJob.new
@@ -157,6 +185,46 @@ post "/api/file" do
   { status: "ok", path: rel, bytes: content.bytesize }.to_json
 end
 
+# --- mrbgemのビルド組み込み -------------------------------------------
+#
+# R2P2-ESP32本体のbuild_config(components/picoruby-esp32/build_config/*.rb)は
+# xtensa/riscv・femtoruby/picoruby の組み合わせで4種あり、ツールチェイン設定など
+# 込み入った内容を持つ。これをプロジェクトごとに複製すると本家の変更に追従できなく
+# なるため、複製はせず「本家の設定を評価した最後に、プロジェクト側の追加/除外だけを
+# 差し込む」フックをDockerfileで1行だけ本家4ファイルに追加している(該当箇所は
+# `conf.instance_eval(File.read(ENV['PROJECT_BUILD_CONFIG'])) if ...`)。
+#
+# projects/<project>/mrbgems/以下にあるものは全部自動でビルドに含める(選ぶUIは無い)。
+# プロジェクトの中に物理的にmrbgemを置く=そのプロジェクトで使う、という構造そのものが
+# 選択を兼ねているので、ビルドのたびに`generated_build_config_content`で
+# 「その時点でmrbgems/以下にあるgem一覧」から`conf.gem gemdir:`の並びを作り、
+# その後ろにプロジェクトのbuild_config.rb(デフォルトgemを外したい場合はここに
+# `conf.gems.reject!`を書く、普通の編集可能ファイル)をそのまま連結したものを
+# PROJECT_BUILD_CONFIG経由で渡す。gemdir(自作mrbgemの絶対パス)は常にコンテナ内の
+# 絶対パスで書く(相対パス解決の基点があいまいなmruby側の挙動に依存しないため)。
+
+def project_mrbgem_paths(root)
+  mrbgems_dir = File.join(root, MRBGEMS_DIRNAME)
+  return [] unless Dir.exist?(mrbgems_dir)
+
+  Dir.children(mrbgems_dir).select { |name| File.directory?(File.join(mrbgems_dir, name)) }.sort
+    .map { |name| File.join(mrbgems_dir, name) }
+end
+
+def generated_build_config_content(root)
+  lines = ["# picoruby-esp32-ide が自動生成する部分(#{MRBGEMS_DIRNAME}/以下のgemを追加する)"]
+  project_mrbgem_paths(root).each { |path| lines << "conf.gem gemdir: #{path.inspect}" }
+
+  build_config_path = File.join(root, BUILD_CONFIG_FILENAME)
+  if File.file?(build_config_path)
+    lines << ""
+    lines << "# ここから下は #{BUILD_CONFIG_FILENAME} の内容"
+    lines << File.read(build_config_path)
+  end
+
+  lines.join("\n") + "\n"
+end
+
 # idf.py / rake は ESP-IDF の export.sh を読み込んだシェルでしか使えない。
 # コンテナのエントリポイントで export 済みの環境ならそのまま動くが、
 # (docker exec 経由など)export されていない場合に備えて明示的に読み込む。
@@ -192,7 +260,10 @@ end
 # R2P2-ESP32 のビルド(idf.py build)をバックグラウンドで開始する。
 # 実行中に重ねて叩かれた場合は 409 を返す(同時に複数走らせない)。
 #
-# body(JSON、両方省略可):
+# body(JSON):
+#   project: "hello_world_project" のようなプロジェクト名(必須)。app/以下を
+#            実機の起動スクリプトに、mrbgems/以下とbuild_config.rbをビルド設定に
+#            それぞれ反映させる(詳細は上のコメント参照)
 #   vm: "femtoruby" | "picoruby" — 省略時は現在のCMake設定のデフォルトVMのまま
 #   usb_console: true | false    — 省略時は現在のsdkconfigの設定のまま
 post "/api/build" do
@@ -206,6 +277,26 @@ post "/api/build" do
       json_error(400, "invalid json body")
     end
 
+  project_name = payload["project"]
+  json_error(400, "project is required") if project_name.to_s.empty?
+
+  root =
+    begin
+      project_root(project_name)
+    rescue ArgumentError
+      json_error(400, "invalid project")
+    end
+
+  # そのprojectのapp/以下を実機の起動スクリプトにする(STORAGE_HOME_DIR参照)。
+  # 前回別プロジェクトをビルドしたときの残骸が残らないよう、まずstorage/home/を
+  # 空にしてからコピーし直す。
+  FileUtils.mkdir_p(STORAGE_HOME_DIR)
+  FileUtils.rm_rf(Dir.glob(File.join(STORAGE_HOME_DIR, "*")))
+  project_app_dir = File.join(root, APP_DIRNAME)
+  if Dir.exist?(project_app_dir)
+    FileUtils.cp_r(Dir.glob(File.join(project_app_dir, "*")), STORAGE_HOME_DIR)
+  end
+
   vm = payload["vm"].to_s.empty? ? nil : payload["vm"]
   json_error(400, "invalid vm") if vm && !BUILD_VM_FLAGS.key?(vm)
   usb_console = payload["usb_console"] == true
@@ -213,18 +304,24 @@ post "/api/build" do
   build_cmd = +"idf.py build"
   build_cmd << " -DPICORB_VM=#{BUILD_VM_FLAGS[vm]}" if vm
 
-  full_cmd =
-    if usb_console != sdkconfig_has_usb_console?
-      # SDKCONFIG_DEFAULTS は sdkconfig ファイルが無いときにしか読まれない仕組みなので、
-      # 現在の設定と要求された設定が食い違うときだけ sdkconfig を消してビルドし直す
-      # (README.md「If you change SDKCONFIG_DEFAULTS, delete the sdkconfig file and
-      # rebuild from scratch」参照。fullclean/deep_cleanでも消えないので明示的に消す)。
-      # 値が変わらない限りはこのクリーンビルドを避け、従来通りの差分ビルドのままにする。
-      sdkconfig_defaults = usb_console ? USB_CONSOLE_SDKCONFIG_DEFAULTS : "sdkconfig.defaults"
-      "rm -f sdkconfig && SDKCONFIG_DEFAULTS=#{Shellwords.escape(sdkconfig_defaults)} #{build_cmd}"
-    else
-      build_cmd
-    end
+  # projects/<project>/mrbgems/以下の現在の一覧とbuild_config.rbから、実際に
+  # R2P2-ESP32へ渡すファイルをビルドのたびに作り直す(generated_build_config_content参照)。
+  generated_build_config = File.join(root, GENERATED_BUILD_CONFIG_FILENAME)
+  File.write(generated_build_config, generated_build_config_content(root))
+  env_assignments = ["PROJECT_BUILD_CONFIG=#{Shellwords.escape(generated_build_config)}"]
+
+  if usb_console != sdkconfig_has_usb_console?
+    # SDKCONFIG_DEFAULTS は sdkconfig ファイルが無いときにしか読まれない仕組みなので、
+    # 現在の設定と要求された設定が食い違うときだけ sdkconfig を消してビルドし直す
+    # (README.md「If you change SDKCONFIG_DEFAULTS, delete the sdkconfig file and
+    # rebuild from scratch」参照。fullclean/deep_cleanでも消えないので明示的に消す)。
+    # 値が変わらない限りはこのクリーンビルドを避け、従来通りの差分ビルドのままにする。
+    sdkconfig_defaults = usb_console ? USB_CONSOLE_SDKCONFIG_DEFAULTS : "sdkconfig.defaults"
+    env_assignments << "SDKCONFIG_DEFAULTS=#{Shellwords.escape(sdkconfig_defaults)}"
+    full_cmd = "rm -f sdkconfig && #{env_assignments.join(' ')} #{build_cmd}"
+  else
+    full_cmd = env_assignments.empty? ? build_cmd : "#{env_assignments.join(' ')} #{build_cmd}"
+  end
 
   started = BUILD_JOB.start(r2p2_shell_command(full_cmd))
   json_error(409, "build already running") unless started

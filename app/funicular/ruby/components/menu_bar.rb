@@ -1,10 +1,12 @@
 # 最上部のメニュー/グローバルステータスバー。
 #
-# プロジェクトの切り替えは左のファイルツリー(ProjectList)側で行うが、
-# 「ビルド開始」「プラットフォーム選択」「デバイスにインストール」は
+# プロジェクトの切り替えもここのドロップダウンで行う(以前はサイドバーのProjectList
+# だったが、「上部のドロップダウンから選べるようにしたい」という要望で移動した)。
+# 「ビルド開始」「プラットフォーム選択」「デバイスにインストール」も
 # 実行頻度が高く画面のどこにいても操作したい機能なので、ここに集約している。
 # 他のパネルと同じく表示専用で、実処理(状態管理・API呼び出し)は
-# props[:on_build] / props[:on_platform_select] 経由で親(EditorApp)に委譲する。
+# props[:on_project_select] / props[:on_build] / props[:on_platform_select] 経由で
+# 親(EditorApp)に委譲する。
 class MenuBar < Funicular::Component
   MANIFEST_PATH = '/api/firmware/manifest.json'
 
@@ -20,7 +22,7 @@ class MenuBar < Funicular::Component
   def render
     div(class: 'menu-bar') do
       span(class: 'menu-bar-title') { 'PicoRuby ESP32 IDE' }
-      render_project_chip
+      render_project_select
       render_platform_select
       div(class: 'menu-bar-spacer')
       render_build_button
@@ -33,6 +35,18 @@ class MenuBar < Funicular::Component
     event.preventDefault
     on_build = props[:on_build]
     on_build.call if on_build
+  end
+
+  # <select> の変更イベント。プレースホルダ("プロジェクト未選択")が選ばれた場合は無視する。
+  def handle_project_change(event)
+    node = refs[:project_select]
+    return unless node
+
+    value = node[:value].to_s
+    return if value.empty?
+
+    on_project_select = props[:on_project_select]
+    on_project_select.call(value) if on_project_select
   end
 
   # <select> の変更イベント。プレースホルダ("ターゲット未選択")が選ばれた場合は無視する。
@@ -49,8 +63,24 @@ class MenuBar < Funicular::Component
 
   private
 
-  def render_project_chip
-    span(class: 'menu-bar-chip project') { props[:current_project] || 'プロジェクト未選択' }
+  def render_project_select
+    projects = props[:projects] || []
+
+    if props[:loading_projects] || projects.empty?
+      tag(:select, disabled: true) { tag(:option, value: '') { 'プロジェクト未選択' } }
+    else
+      tag(:select, ref: :project_select, onchange: :handle_project_change) { render_project_options(projects) }
+    end
+  end
+
+  def render_project_options(projects)
+    projects.each do |name|
+      if name == props[:current_project]
+        tag(:option, value: name, selected: true) { name }
+      else
+        tag(:option, value: name) { name }
+      end
+    end
   end
 
   # プラットフォーム選択(旧 PlatformPanel のボタン群をここに集約したもの)。
