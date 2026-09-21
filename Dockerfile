@@ -32,11 +32,10 @@ RUN git submodule update --init --recursive
 # Rubyファイルをconfのコンテキストで評価するだけなので、本家の内容には一切手を
 # 加えない(詳細はCLAUDE.mdおよびapp.rbのコメント参照)。
 RUN for f in components/picoruby-esp32/build_config/*.rb; do \
-      head -n -1 "$f" > "$f.tmp" && \
-      printf '  conf.instance_eval(File.read(ENV["PROJECT_BUILD_CONFIG"]), ENV["PROJECT_BUILD_CONFIG"]) if ENV["PROJECT_BUILD_CONFIG"] && File.exist?(ENV["PROJECT_BUILD_CONFIG"])\n' >> "$f.tmp" && \
-      echo "end" >> "$f.tmp" && \
-      mv "$f.tmp" "$f"; \
-    done
+    head -n -1 "$f" > "$f.tmp" && \
+    printf '\n  conf.instance_eval(File.read(ENV["PROJECT_BUILD_CONFIG"]), ENV["PROJECT_BUILD_CONFIG"]) if ENV["PROJECT_BUILD_CONFIG"] && File.exist?(ENV["PROJECT_BUILD_CONFIG"])\nend\n' >> "$f.tmp" && \
+    mv "$f.tmp" "$f"; \
+done
 
 RUN . "${IDF_PATH}/export.sh"
 

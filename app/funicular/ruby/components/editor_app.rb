@@ -34,16 +34,21 @@ class EditorApp < Funicular::Component
       build_log: '',
       build_log_truncated: false,
       building: false,
-      build_vm: '',
-      build_usb_console: false,
-      build_dialog_open: false,
+      settings_dialog_open: false,
+      project_config: default_project_config,
+      settings_platform: nil,
+      settings_vm: '',
+      settings_usb_console: false,
       platform_status: 'idle',
       platform_log: '',
       platform_log_truncated: false,
       platform_building: false,
-      selected_platform: nil,
       log_tab: 'build'
     }
+  end
+
+  def default_project_config
+    { 'platform' => nil, 'vm' => nil, 'usb_console' => false }
   end
 
   def component_mounted
@@ -70,23 +75,27 @@ class EditorApp < Funicular::Component
         projects: state[:projects],
         loading_projects: state[:loading_projects],
         current_project: state[:current_project],
-        selected_platform: state[:selected_platform],
+        project_config: state[:project_config],
         build_status: state[:build_status],
         building: state[:building],
         platform_building: state[:platform_building],
         on_project_select: ->(name) { select_project(name) },
-        on_build: -> { patch(build_dialog_open: true) },
-        on_platform_select: ->(name) { start_platform_setup(name) }
+        on_settings: -> { open_settings_dialog },
+        on_setup: -> { start_platform_setup },
+        on_build: -> { start_build }
       )
 
-      if state[:build_dialog_open]
-        component(BuildDialog,
-          selected_vm: state[:build_vm],
-          usb_console: state[:build_usb_console],
-          on_vm_change: ->(vm) { patch(build_vm: vm) },
-          on_usb_console_change: ->(enabled) { patch(build_usb_console: enabled) },
-          on_confirm: -> { patch(build_dialog_open: false); start_build },
-          on_cancel: -> { patch(build_dialog_open: false) }
+      if state[:settings_dialog_open]
+        component(ProjectSettingsDialog,
+          project: state[:current_project],
+          platform: state[:settings_platform],
+          vm: state[:settings_vm],
+          usb_console: state[:settings_usb_console],
+          on_platform_change: ->(platform) { patch(settings_platform: platform) },
+          on_vm_change: ->(vm) { patch(settings_vm: vm) },
+          on_usb_console_change: ->(enabled) { patch(settings_usb_console: enabled) },
+          on_save: -> { save_project_settings },
+          on_cancel: -> { patch(settings_dialog_open: false) }
         )
       end
 
@@ -135,7 +144,7 @@ class EditorApp < Funicular::Component
             platform_status: state[:platform_status],
             platform_log: state[:platform_log],
             platform_log_truncated: state[:platform_log_truncated],
-            selected_platform: state[:selected_platform],
+            selected_platform: value_of(state[:project_config], 'platform'),
             on_tab_change: ->(tab) { patch(log_tab: tab) },
             on_build_refresh: -> { refresh_build_status },
             on_platform_refresh: -> { refresh_platform_status }
@@ -230,11 +239,30 @@ class EditorApp < Funicular::Component
       content: '',
       saved_content: '',
       status: '',
-      status_kind: ''
+      status_kind: '',
+      settings_dialog_open: false,
+      project_config: default_project_config
     )
     # プロジェクト切り替え時は非制御の textarea もクリアしておく
     sync_textarea('')
     load_file_list(name)
+    load_project_config(name)
+  end
+
+  def load_project_config(name)
+    Funicular::HTTP.get("/api/projects/#{encode(name)}/config") do |response|
+      next unless response.ok
+      next unless name == state[:current_project]
+
+      data = response.data || {}
+      patch(
+        project_config: {
+          'platform' => value_of(data, 'platform'),
+          'vm' => value_of(data, 'vm'),
+          'usb_console' => truthy?(value_of(data, 'usb_console'))
+        }
+      )
+    end
   end
 
   def load_file_list(project)
@@ -302,7 +330,7 @@ class EditorApp < Funicular::Component
 
     patch(building: true, build_status: 'running', build_log: '')
 
-    payload = { project: state[:current_project], vm: state[:build_vm], usb_console: state[:build_usb_console] }
+    payload = { project: state[:current_project] }
     Funicular::HTTP.post('/api/build', payload) do |response|
       if response.ok
         schedule_build_poll
@@ -351,17 +379,13 @@ class EditorApp < Funicular::Component
     end
   end
 
-  def start_platform_setup(name)
+  def start_platform_setup
     return if state[:platform_building]
+    return if value_of(state[:project_config], 'platform').to_s.empty?
 
-    patch(
-      platform_building: true,
-      platform_status: 'running',
-      platform_log: '',
-      selected_platform: name
-    )
+    patch(platform_building: true, platform_status: 'running', platform_log: '')
 
-    Funicular::HTTP.post('/api/platform', { platform: name }) do |response|
+    Funicular::HTTP.post('/api/platform', { project: state[:current_project] }) do |response|
       if response.ok
         schedule_platform_poll
       else
@@ -398,6 +422,42 @@ class EditorApp < Funicular::Component
       )
 
       schedule_platform_poll if still_running
+    end
+  end
+
+  # --- プロジェクト設定ダイアログ -----------------------------------------
+
+  # 現在保存されている設定(state[:project_config])を作業用のフィールドへ
+  # コピーしてダイアログを開く。キャンセルすれば作業用フィールドは捨てられる。
+  def open_settings_dialog
+    config = state[:project_config] || {}
+    patch(
+      settings_dialog_open: true,
+      settings_platform: value_of(config, 'platform'),
+      settings_vm: value_of(config, 'vm').to_s,
+      settings_usb_console: truthy?(value_of(config, 'usb_console'))
+    )
+  end
+
+  def save_project_settings
+    project = state[:current_project]
+    platform = state[:settings_platform]
+    vm = state[:settings_vm].to_s.empty? ? nil : state[:settings_vm]
+    usb_console = state[:settings_usb_console]
+
+    payload = { platform: platform, vm: vm, usb_console: usb_console }
+    Funicular::HTTP.post("/api/projects/#{encode(project)}/config", payload) do |response|
+      if response.ok
+        patch(
+          settings_dialog_open: false,
+          project_config: { 'platform' => platform, 'vm' => vm, 'usb_console' => usb_console },
+          status: 'プロジェクト設定を保存しました',
+          status_kind: 'ok'
+        )
+      else
+        message = response.error_message
+        patch(status: (message && !message.empty?) ? message : '設定の保存に失敗しました', status_kind: 'error')
+      end
     end
   end
 

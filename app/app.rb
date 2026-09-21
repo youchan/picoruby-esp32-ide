@@ -3,6 +3,7 @@ require "json"
 require "open3"
 require "shellwords"
 require "fileutils"
+require "yaml"
 require_relative "background_job"
 
 set :public_folder, File.join(__dir__, "public")
@@ -185,6 +186,79 @@ post "/api/file" do
   { status: "ok", path: rel, bytes: content.bytesize }.to_json
 end
 
+# --- プロジェクト設定(ターゲット・VM・USB Console) ----------------------
+#
+# 以前はビルドボタンを押すたびにダイアログでVM/USB Consoleを選ばせ、ターゲット
+# チップはメニューバーの常設セレクトで選ぶ形だったが、「プロジェクトの設定として
+# プロジェクトに含めたい」というフィードバックを受けて、プロジェクトごとに
+# 隠しファイル`.config.yml`(PROJECT_CONFIG_FILENAME)へ永続化する方式に変更した。
+# UI側は「設定」ダイアログで編集し、ビルド/プラットフォームセットアップは
+# その時点の設定値をそのまま使って即座に実行するだけになる。
+
+PROJECT_CONFIG_FILENAME = ".config.yml"
+
+# ファイルが無い、あるいは壊れている場合は「何も設定されていない」扱い
+# (platform/vmはnil = 未選択・デフォルト、usb_consoleはfalse)にする。
+def read_project_config(root)
+  path = File.join(root, PROJECT_CONFIG_FILENAME)
+  data =
+    begin
+      File.file?(path) ? YAML.safe_load(File.read(path)) : nil
+    rescue Psych::SyntaxError
+      nil
+    end
+  data ||= {}
+
+  {
+    "platform" => data["platform"],
+    "vm" => data["vm"],
+    "usb_console" => data["usb_console"] == true
+  }
+end
+
+get "/api/projects/:name/config" do
+  content_type :json
+
+  root =
+    begin
+      project_root(params[:name])
+    rescue ArgumentError
+      json_error(400, "invalid project")
+    end
+
+  read_project_config(root).to_json
+end
+
+# body(JSON): { platform:, vm:, usb_console: } — platform/vmはnull(未選択)も許可
+post "/api/projects/:name/config" do
+  content_type :json
+
+  root =
+    begin
+      project_root(params[:name])
+    rescue ArgumentError
+      json_error(400, "invalid project")
+    end
+
+  payload =
+    begin
+      JSON.parse(request.body.read)
+    rescue JSON::ParserError
+      json_error(400, "invalid json body")
+    end
+
+  platform = payload["platform"]
+  json_error(400, "invalid platform") if platform && !PLATFORM_TARGETS.include?(platform)
+
+  vm = payload["vm"]
+  json_error(400, "invalid vm") if vm && !BUILD_VM_FLAGS.key?(vm)
+
+  config = { "platform" => platform, "vm" => vm, "usb_console" => payload["usb_console"] == true }
+  File.write(File.join(root, PROJECT_CONFIG_FILENAME), YAML.dump(config))
+
+  { status: "ok" }.to_json
+end
+
 # --- mrbgemのビルド組み込み -------------------------------------------
 #
 # R2P2-ESP32本体のbuild_config(components/picoruby-esp32/build_config/*.rb)は
@@ -259,13 +333,13 @@ end
 
 # R2P2-ESP32 のビルド(idf.py build)をバックグラウンドで開始する。
 # 実行中に重ねて叩かれた場合は 409 を返す(同時に複数走らせない)。
+# VM・USB Consoleはリクエストでは受け取らず、そのプロジェクトの`.config.yml`
+# (read_project_config)に保存されている値をそのまま使う。
 #
 # body(JSON):
 #   project: "hello_world_project" のようなプロジェクト名(必須)。app/以下を
 #            実機の起動スクリプトに、mrbgems/以下とbuild_config.rbをビルド設定に
 #            それぞれ反映させる(詳細は上のコメント参照)
-#   vm: "femtoruby" | "picoruby" — 省略時は現在のCMake設定のデフォルトVMのまま
-#   usb_console: true | false    — 省略時は現在のsdkconfigの設定のまま
 post "/api/build" do
   content_type :json
 
@@ -297,9 +371,9 @@ post "/api/build" do
     FileUtils.cp_r(Dir.glob(File.join(project_app_dir, "*")), STORAGE_HOME_DIR)
   end
 
-  vm = payload["vm"].to_s.empty? ? nil : payload["vm"]
-  json_error(400, "invalid vm") if vm && !BUILD_VM_FLAGS.key?(vm)
-  usb_console = payload["usb_console"] == true
+  project_config = read_project_config(root)
+  vm = project_config["vm"]
+  usb_console = project_config["usb_console"]
 
   build_cmd = +"idf.py build"
   build_cmd << " -DPICORB_VM=#{BUILD_VM_FLAGS[vm]}" if vm
@@ -335,9 +409,13 @@ get "/api/platform" do
   PLATFORM_JOB.to_response_json
 end
 
-# 指定プラットフォーム向けに `rake setup_#{platform}` をバックグラウンドで実行する。
+# 指定プロジェクトの`.config.yml`に設定されているターゲットへ向けて
+# `rake setup_#{platform}` をバックグラウンドで実行する。ターゲット自体は
+# リクエストでは受け取らず、プロジェクト設定ダイアログで保存された値を使う。
 # setup_esp32xxx は deep_clean + setup(mrubyの再ビルド) + idf.py set-target という
 # 重い処理の直列実行(R2P2-ESP32/rakelib/setup.rake参照)。
+#
+# body(JSON): { project: "hello_world_project" }(必須)
 post "/api/platform" do
   content_type :json
 
@@ -348,8 +426,18 @@ post "/api/platform" do
       json_error(400, "invalid json body")
     end
 
-  platform = payload["platform"]
-  json_error(400, "invalid platform") unless PLATFORM_TARGETS.include?(platform)
+  project_name = payload["project"]
+  json_error(400, "project is required") if project_name.to_s.empty?
+
+  root =
+    begin
+      project_root(project_name)
+    rescue ArgumentError
+      json_error(400, "invalid project")
+    end
+
+  platform = read_project_config(root)["platform"]
+  json_error(400, "platform is not configured for this project") if platform.to_s.empty?
 
   started = PLATFORM_JOB.start(r2p2_shell_command("rake setup_#{platform}"))
   json_error(409, "platform setup already running") unless started

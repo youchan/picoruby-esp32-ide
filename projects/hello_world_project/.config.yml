@@ -1,0 +1,4 @@
+---
+platform: esp32s3
+vm: femtoruby
+usb_console: true

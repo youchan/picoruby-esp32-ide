@@ -450,13 +450,12 @@ button.build-refresh:hover:not(:disabled) {
   padding: 16px 16px 12px;
 }
 
-.build-dialog .build-options {
+.settings-dialog .build-options {
   border-bottom: none;
   flex-direction: column;
   align-items: flex-start;
   gap: 12px;
 }
-
 
 .dialog-actions {
   display: flex;

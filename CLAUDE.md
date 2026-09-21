@@ -427,3 +427,27 @@ conf.gems.reject! { |g| g.name == "picoruby-vim" }
 用意しない限り失敗するようになる(ESP-IDFの component manager自体はPyPIではなく
 ESP Component Registryを見る別の仕組みなので影響を受けない)。今のところこの
 コンテナ内でpipを使うのはここだけなので許容している。
+
+## プロジェクト設定(ターゲット・VM・USB Console)
+
+ターゲットチップ(`esp32`等)・VM(femtoruby/picoruby)・USB Consoleは、最初は
+メニューバー常設のセレクト(ターゲット)や、ビルド開始のたびに出るダイアログ
+(VM/USB Console)で毎回選ばせる作りだったが、「プロジェクトの設定として
+プロジェクトに含めたい」というフィードバックを受けて、mrbgemのopt-out方式への
+変更や「プロジェクトのapp.rbを起動スクリプトにする」変更と同じ考え方
+(プロジェクトディレクトリの中に状態を持たせる)で、プロジェクトごとの隠しファイル
+`.config.yml`(`PROJECT_CONFIG_FILENAME`)に永続化する方式に変えた。
+
+- `GET`/`POST /api/projects/:name/config` — 読み書き。`read_project_config`は
+  ファイルが無い/壊れている場合「未設定」(platform/vmはnil、usb_consoleはfalse)
+  として扱う(`YAML.safe_load`が例外を出す壊れたYAMLでも落ちないようにしてある)
+- UI側は`ProjectSettingsDialog`(旧`BuildDialog`を置き換え)でこの3項目をまとめて
+  編集・保存する。保存後は「プラットフォームをセットアップ」
+  (`POST /api/platform`、bodyは`{project:}`のみ)「ビルド開始」
+  (`POST /api/build`、bodyは`{project:}`のみ)の各ボタンが、リクエストの
+  パラメータではなくその時点で保存済みの`.config.yml`の値をサーバ側で読んで
+  そのまま使う。都度選び直す必要がなくなった
+- プロジェクトを切り替えたら`load_project_config`でそのプロジェクトの
+  `.config.yml`を読み直す(`select_project`から呼ぶ)。切り替え中に古いレスポンスが
+  後から返ってきて新しいプロジェクトの設定を上書きしないよう、レスポンス受信時に
+  `state[:current_project]`と一致するかを確認してから反映している

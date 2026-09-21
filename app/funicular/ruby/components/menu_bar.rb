@@ -2,15 +2,16 @@
 #
 # プロジェクトの切り替えもここのドロップダウンで行う(以前はサイドバーのProjectList
 # だったが、「上部のドロップダウンから選べるようにしたい」という要望で移動した)。
-# 「ビルド開始」「プラットフォーム選択」「デバイスにインストール」も
-# 実行頻度が高く画面のどこにいても操作したい機能なので、ここに集約している。
+# ターゲットチップ・VM・USB Consoleは以前ここに常設セレクト/ビルド時ダイアログで
+# 出していたが、「プロジェクトの設定としてプロジェクトに含めたい」という
+# フィードバックを受けてプロジェクトごとの`.config.yml`に持たせる方式に変更した。
+# そのため、ここには設定値を編集する「設定」ボタンと、その設定値をそのまま使って
+# 実行するだけの「セットアップ」「ビルド開始」ボタンだけが残っている。
 # 他のパネルと同じく表示専用で、実処理(状態管理・API呼び出し)は
-# props[:on_project_select] / props[:on_build] / props[:on_platform_select] 経由で
-# 親(EditorApp)に委譲する。
+# props[:on_project_select] / props[:on_settings] / props[:on_setup] /
+# props[:on_build] 経由で親(EditorApp)に委譲する。
 class MenuBar < Funicular::Component
   MANIFEST_PATH = '/api/firmware/manifest.json'
-
-  PLATFORMS = %w[esp32 esp32c3 esp32c6 esp32h2 esp32p4 esp32s3].freeze
 
   STATUS_LABELS = {
     'idle' => 'ビルド未実行',
@@ -23,18 +24,13 @@ class MenuBar < Funicular::Component
     div(class: 'menu-bar') do
       span(class: 'menu-bar-title') { 'PicoRuby ESP32 IDE' }
       render_project_select
-      render_platform_select
       div(class: 'menu-bar-spacer')
+      render_settings_button
+      render_setup_button
       render_build_button
       render_status_pill
       render_install_button
     end
-  end
-
-  def handle_build(event)
-    event.preventDefault
-    on_build = props[:on_build]
-    on_build.call if on_build
   end
 
   # <select> の変更イベント。プレースホルダ("プロジェクト未選択")が選ばれた場合は無視する。
@@ -49,16 +45,22 @@ class MenuBar < Funicular::Component
     on_project_select.call(value) if on_project_select
   end
 
-  # <select> の変更イベント。プレースホルダ("ターゲット未選択")が選ばれた場合は無視する。
-  def handle_platform_change(event)
-    node = refs[:platform_select]
-    return unless node
+  def handle_settings(event)
+    event.preventDefault
+    on_settings = props[:on_settings]
+    on_settings.call if on_settings
+  end
 
-    value = node[:value].to_s
-    return if value.empty?
+  def handle_setup(event)
+    event.preventDefault
+    on_setup = props[:on_setup]
+    on_setup.call if on_setup
+  end
 
-    on_platform_select = props[:on_platform_select]
-    on_platform_select.call(value) if on_platform_select
+  def handle_build(event)
+    event.preventDefault
+    on_build = props[:on_build]
+    on_build.call if on_build
   end
 
   private
@@ -83,29 +85,20 @@ class MenuBar < Funicular::Component
     end
   end
 
-  # プラットフォーム選択(旧 PlatformPanel のボタン群をここに集約したもの)。
-  # disabled は「属性を付けない/付ける」で切り替える(false を渡す書き方に依存しないため)。
-  def render_platform_select
-    if props[:platform_building]
-      tag(:select, ref: :platform_select, onchange: :handle_platform_change, disabled: true) { render_platform_options }
-    else
-      tag(:select, ref: :platform_select, onchange: :handle_platform_change) { render_platform_options }
-    end
+  def render_settings_button
+    button(class: 'menu-settings', onclick: :handle_settings) { '設定' }
   end
 
-  def render_platform_options
-    if props[:selected_platform].nil?
-      tag(:option, value: '', selected: true, disabled: true) { 'ターゲット未選択' }
-    else
-      tag(:option, value: '', disabled: true) { 'ターゲット未選択' }
-    end
+  # ターゲットが未設定なら押せない(設定ダイアログで選んでもらう)。
+  def render_setup_button
+    platform = value_of(props[:project_config], 'platform')
 
-    PLATFORMS.each do |name|
-      if name == props[:selected_platform]
-        tag(:option, value: name, selected: true) { name }
-      else
-        tag(:option, value: name) { name }
-      end
+    if props[:platform_building]
+      button(class: 'menu-setup', disabled: true) { 'セットアップ中…' }
+    elsif platform.to_s.empty?
+      button(class: 'menu-setup', disabled: true) { 'ターゲット未設定' }
+    else
+      button(class: 'menu-setup', onclick: :handle_setup) { "#{platform}をセットアップ" }
     end
   end
 
@@ -133,5 +126,10 @@ class MenuBar < Funicular::Component
 
   def status_label
     STATUS_LABELS[props[:build_status]] || props[:build_status].to_s
+  end
+
+  def value_of(data, key)
+    return nil unless data
+    data[key] || data[key.to_sym]
   end
 end
