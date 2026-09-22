@@ -540,3 +540,203 @@ Ruby/rbenv/R2P2-ESP32を全部イメージから追い出して「ESP-IDFツー�
 いずれも`docker build` → 実際に`rake setup_esp32`を`docker run`経由で実行して
 初めて見つかったバグ。`ruby -c`のような静的チェックでは検出できない類のもの
 なので、Dockerfileを変更したときは必ず実際にビルド〜実行まで通すこと。
+
+## PicoRuby Web Terminal相当の機能(ソースコードペインのタブ切り替え)
+
+ビルド・インストール(ESP Web Tools)とは別に、実機のUSBシリアルに直接つないで
+対話するターミナル画面を追加した。エディタ(`editor-area`)を「エディタ」/
+「ターミナル」のタブ切り替えにし(`editor_app.rb`の`editor_tab` state、
+`.tab-pane` / `.tab-pane.hidden`)、現在のプロジェクトの`app/`以下を実機の
+`/home/`以下へ転送する「app/ をアップロード」ボタンも一緒に置いた。
+
+**ターミナル関連の状態・ロジックは全部`editor_app.rb`(ルートコンポーネント)の
+中にある。** 当初は`TerminalPanel`という別コンポーネントに分けていたが、後述の
+「子コンポーネントは親の再描画のたびに作り直される」問題を踏んで`EditorApp`に
+統合した。次にこの機能を触るときも、うっかり別コンポーネントに切り出さないこと。
+
+### 設計方針: サーバは一切関与しない
+
+ビルド/インストールは「サーバでビルド → ブラウザのWeb Serial API(ESP Web Tools)で
+書き込み」という2段構えだったが、ターミナルは書き込み後の対話なので
+サーバを経由する理由が無い。ブラウザ⇔実機USBを直結する
+(picoruby.org/terminal https://picoruby.org/terminal 、実装は
+https://github.com/picoruby/picoruby.github.io の pages/r2p2/terminal.rb
+と pages/r2p2/terminal.html 参照)のと同じ構成にした。
+
+### `JS::WebSerial`はpicoruby-wasm本体が既に持っている
+
+エディタ画面自体がFunicular(hasumikin作、PicoRuby.wasm上で動くVDOMフレームワーク)
+で動いており、Web Serial APIも「アプリ側でJSを書いて橋渡しする」のではなく
+picoruby-wasm本体(npm `@picoruby/wasm-wasi`)が`JS::WebSerial`として
+既に提供している。このIDEが依存しているバージョン(`@picoruby/wasm-wasi@4.0.2`、
+`views/index.erb`でCDN読み込み)に実際に入っているかどうかは、この機能を
+実装する時点でのサンドボックスにRubyはあってもブラウザでの実機テストが
+できなかったため、`npm pack @picoruby/wasm-wasi@4.0.2`して展開した
+`dist/picoruby.wasm`/`dist/picoruby.js`に対して`strings`やNode.jsで文字列検索し、
+以下を確認して裏付けを取った:
+
+- `dist/picoruby.js`に`serial_request_port` `serial_port_open` `serial_start_reading`
+  `serial_binary_capture_start/read/stop` 等のJS側関数が実装済みで存在する
+- `dist/picoruby.wasm`(コンパイル済みバイナリ)の文字列に、picoruby本体の
+  `mrbgems/picoruby-wasm/mrblib/webserial.rb`(`JS::WebSerial`のRuby側API。
+  `supported?` `connect` `open` `on_receive` `on_disconnect` `write_bytes`
+  `opened?`、Cで実装される`_request_port` `_open_port` `_start_reading`
+  `_close_port_promise`等)や、`crc16` `crc32`(`require 'crc'`、
+  `picoruby-crc`)、`pack`/`unpack`(`Array#pack`/`String#unpack`)、
+  `start_terminal_read` `binary_capture_read/start/stop` `drain` `@js_port`
+  といった、picoruby.org/terminalのterminal.rbが実際に呼んでいるメソッド名が
+  ほぼそのまま埋め込まれている
+
+以上から、このnpmパッケージがFunicular同梱・WebSerial対応の(picoruby.org/terminal
+と同系統の)ビルドだと判断し、terminal.rbの実装をほぼそのまま移植する方針にした。
+実際に`bin/server`相当(`bundle exec ruby app/app.rb`)を起動し、ブラウザで
+「デバイスに接続」を押したところ、`navigator.serial.requestPort()`が実際に
+呼ばれ(実機もポート選択もないため`Failed to execute 'requestPort' on 'Serial':
+No port selected by the user.`という本物のブラウザ例外が返り、それを
+Rubyの`rescue`が捕まえてステータス表示に出す、というエンドツーエンドの配線は
+確認できた。ただし実機(ESP32)を使ったPicoModem転送そのものは、この環境に
+実機が無いため未検証。実際に試す際は先に実機をUSB接続し、R2P2のプロンプトが
+出ている状態で試すこと。
+
+**罠**: `dist/picoruby.wasm`に対する`strings`でのメソッド名検索は、
+`serial_binary_capture_start`のような長く固有な名前には有効だが、
+`getbyte` `pack` `sub` `each` `ord`のような短くありふれたメソッド名では
+**実際には使えるのに見つからない(偽陰性)**ことがある(既にこのアプリで
+動いている`.each`ですら`strings`では見つからなかった)。おそらくmrubyの
+シンボルテーブルが短い名前を`strings`が拾えない形式で保持しているため。
+そのため「`strings`で見つからない」ことは「使えない」ことの証拠にはならない。
+`String#getbyte`が実際に使えるかどうかを最終確認したときは、
+`EditorApp#component_mounted`に一時的な自己診断コード(各メソッドを
+`begin/rescue`で呼んで`JS.global[:console].log`に結果を出すだけのもの)を
+仕込み、`bundle exec ruby app/app.rb`を実際に起動してブラウザの
+コンソールログで確認した上でコードを削除する、という手順を踏んだ。
+この手のAPI有無の確認は静的な文字列探索より、実際に動かして確認するほうが早くて確実。
+
+### デバイス再起動時の自動再接続
+
+「デバイスを再起動すると接続が切れる」というフィードバックを受けて、
+picoruby.org/terminalと同じ自動再接続を実装した。ESP32がリセットされると
+USBの列挙が一瞬切れて同じ物理ポートとして再度現れる(Web Serial的には
+対象ポートの`disconnect`に続けて、ブラウザ全体に`navigator.serial`の
+`connect`イベントが飛んでくる)。ユーザーが明示的に「切断」ボタンを押した
+のでなければ、ポートが再度現れた時点で確認ダイアログ無しに自動で開き直す
+(`EditorApp#watch_for_terminal_reconnect` / `#attempt_terminal_auto_reconnect`)。
+
+これも前節と同じ理由(`strings`は短い名前を拾えないことがある)で、
+`JS::WebSerial.methods(false)` / `.instance_methods(false)`を実際に
+ブラウザのコンソールへ出して初めて全容が分かった。分かったこと:
+
+- クラスメソッドに`_watch_connect_events` `_take_last_connected_port`という
+  低レベルAPIは**存在する**(npmパッケージのwasmにC拡張として直接コンパイル
+  済み)。JS側実装(`picoruby.js`)はグローバルに1回だけ`navigator.serial`の
+  `connect`イベントを監視し、来たポートを`globalThis.picorubyLastConnectedSerialPort`
+  に控えつつ`window`に`serial-port-connect`というCustomEventを飛ばす、という
+  作り
+- ただしmrblib(`webserial.rb`)側には、これらを使う**高レベルのRubyラッパー
+  メソッドが無い**(`on_reconnect`のような便利メソッドは無い)。なので
+  `"_"`付きのままRubyから直接呼ぶ(`JS::WebSerial._watch_connect_events`
+  という具合)。挙動としては`window.picorubySerialConnectWatcherInstalled`
+  というグローバルフラグが立つので、ブラウザのコンソールで
+  `window.picorubySerialConnectWatcherInstalled === true`を見れば
+  登録できたかどうか確認できる(実機テストできない環境でもこれで配線だけは検証可能)
+- 再接続本体は`JS::WebSerial._take_last_connected_port`で控えておいた
+  ポートを取り出し、`JS::WebSerial.new(raw_port)`(`request_port`を経由しない
+  コンストラクタ呼び出し)→`ws.open(baud_rate: ...)`で開き直す、という
+  terminal.rbのApp#bind_events内`serial.addEventListener('connect')`
+  ハンドラとほぼ同じ流れ
+- 個別ポートの`on_disconnect`(`_set_on_disconnect`経由)が発火しない
+  ブラウザ/デバイスの組み合わせに備えて、`navigator.serial`自体の
+  `disconnect`イベントも保険で見ている(これもterminal.rbと同じ構成)
+
+`@auto_reconnect`(インスタンス変数、`state`には入れていない)で
+「ユーザーが明示的に切断したか」を覚えておき、明示的な切断のときだけ
+自動再接続を止める。実機での動作(実際にリセットして再接続まで確認)は
+この環境では検証できていないので、次に実機を使うセッションで確認すること。
+
+### 「app/ をアップロード」はPicoModemプロトコル(標準ビルドに元々含まれる)
+
+R2P2のシェル(`picoruby-shell`)はプロンプト待機中にCtrl-B(STX, 0x02)を
+受け取ると`PicoModem.session($stdin, $stdout)`(`picoruby-picomodem`)に入り、
+1セッションにつき1ファイルのFILE_WRITE/FILE_READ等を処理してシェルへ戻る
+(`picoruby-shell/mrblib/shell.rb`、`require "picomodem"`が最初から書いてある)。
+`picoruby-picomodem`は`picoruby-shell`の`add_dependency`なので、**mrbgemを
+何も追加しなくても、R2P2-ESP32の標準ビルド(4種のbuild_config全部)に
+最初から含まれている**(実際に`components/picoruby-esp32/build_config/*.rb`と
+`picoruby-shell/mrbgem.rake`を確認して裏付けた)。そのため、実機ファーム側の
+変更は一切不要で、ブラウザ側だけでPicoModemクライアントを実装すればよかった。
+
+フレーム構造(STX + 長さ + Cmd + Payload + CRC16)・CRC32によるファイル整合性
+検証・チャンク分割送信などのプロトコル詳細は、terminal.rbのPicoModemクライアント
+実装をほぼそのまま`editor_app.rb`に移植した。CRC16/CRC32の多項式・初期値も
+picoruby本体`picoruby-crc`のC実装(`crc.c`)から拾って一致させてある。
+
+複数ファイルを送る際、PicoModemは1セッション1ファイルなので
+「Ctrl-B送信→ACK待ち→FILE_WRITE」をファイルごとに繰り返す必要がある。
+`upload_next_terminal_file`は、ファイル内容の取得(`Funicular::HTTP.get`)の
+コールバックが同期/非同期どちらで呼ばれるか確証が持てなかったため、
+`Enumerable#each`ではなく継続渡し(1ファイル完全に終わってから次を呼ぶ)に
+してある。1本のシリアル接続を複数ファイルの転送が同時に取り合うと、
+PicoModemのフレームが混ざって壊れるため。
+
+デバイス上のパスは、`POST /api/build`が`app/`以下を`storage/home/`へコピーする
+(→実機からは`/home/`以下に見える)のと対応を合わせて、`app/foo.rb` →
+`/home/foo.rb`のように変換している。
+
+### xterm.jsは「タブが非表示の間にマウントするとサイズが0になる」問題がある
+
+タブが非表示(`.tab-pane.hidden`、`display: none`)の間にxterm.jsを初期化すると
+コンテナの寸法が0になる。ただし`terminal.open(container)`自体は非表示要素に
+対しても問題なく実行でき、実際の行数/桁数はコンテナに登録した`ResizeObserver`が
+寸法変化(タブ表示時にdisplay:noneが外れて0以外になる)を検知して`fit`し直す
+ので、タブを表示した時点で正しいサイズに追従する。実際にブラウザで「ターミナル
+タブに切り替えた瞬間に`.xterm-rows`が生成され、寸法も正しく反映される」ことを
+確認済み。
+
+### 【重大】子コンポーネントは親が再描画されるたびに作り直される
+#
+# このセクションはこのIDE特有の、かつ他の機能にも影響しうる重要な制約なので
+# 太字にしてある。今後 `component(SomeClass, ...)` で切り出した子コンポーネントに
+# 「一度だけ初期化して使い回したい副作用」(外部リソースへの接続、イベント
+# リスナー登録、外部ライブラリのインスタンス化など)を持たせるときは、必ず
+# このセクションを読み返すこと。
+
+最初`TerminalPanel`という独立コンポーネント(`props`に`project`/`files`/`active`を
+渡し、`state`に接続状態を持たせる作り)にしていたところ、
+「ファイルペインとターミナルペインを行き来すると接続が切れる。再接続しようとすると
+`すでにオープンされている`と言われて失敗する」という不具合が実際のユーザーから
+報告された。
+
+原因はFunicularの仕様: **`component(SomeClass, props)`という呼び出しは、呼び出す
+親(ここではEditorApp)が再描画されるたびに、その子コンポーネントの
+`initialize_state`と`component_mounted`を毎回呼び直す。** ルートコンポーネント
+(`Funicular.start(EditorApp, ...)`に渡すもの)だけがマウント1回を保証される。
+これは`EditorApp`の`initialize_state`/`component_mounted`に呼び出し回数を数える
+一時的なデバッグコードを仕込んで実際にブラウザで確認した(`TerminalPanel`側は
+数回のページ操作だけで3回以上呼ばれたのに対し、`EditorApp`側は終始1回だけだった)。
+
+この既存コードベースを見ると、**このIDEの子コンポーネント(`FileList` `Toolbar`
+`MenuBar` `ProjectSettingsDialog` `LogPanel`)は元から1つも`initialize_state`を
+定義していない**、つまり全部「propsを受け取って描画するだけの表示専用」
+コンポーネントだった。これは単なるコーディング規約ではなく、**Funicularのこの
+挙動に対する回避策として最初から必須の設計**だったということ。`TerminalPanel`は
+この規約を破って唯一`initialize_state`を持つ子コンポーネントにしてしまったために
+問題が表面化した。
+
+具体的に起きていたこと: EditorAppは`patch()`のたびに再描画される(タブ切り替え・
+ファイルを開く・1文字タイプする、等ほぼ全ての操作で発生)。そのたびに
+`TerminalPanel`の`initialize_state`が再実行され、`state[:status]`が初期値
+`'disconnected'`に戻る。一方`@port`(生のシリアルポート、実際にはbrowserレベルで
+まだopenのまま)はインスタンス変数なので必ずしも即座には失われないが、UI表示上は
+「未接続」に見える。ユーザーが「接続」ボタンを押すと`JS::WebSerial.connect`が
+また`_request_port`を呼び、同じ物理デバイスを選ぶと(一度も`.close()`されていない
+ため)ブラウザ側ではまだopenなSerialPortオブジェクトが返り、`.open()`が
+`InvalidStateError`(「すでにオープンされている」)で失敗する。
+
+対処: **状態と副作用(xterm.jsインスタンス、シリアルポート、イベントリスナー)を
+`TerminalPanel`から`EditorApp`本体へ丸ごと統合した**(`terminal_panel.rb`は削除、
+ロジックは`editor_app.rb`に`terminal_`プレフィックス付きのメソッド/state key
+として移動)。これは元々あった「textarea/ハイライト層をコンポーネントに切り出さず
+EditorApp直下に置く」設計と全く同じ理由・同じ対処であり、後から振り返れば
+必然だった。もし将来また「一度だけ初期化する副作用を持つUI」を追加したくなったら、
+別コンポーネントに切り出さずEditorAppに直接書くか、少なくともこの制約を
+踏まえた設計にすること。

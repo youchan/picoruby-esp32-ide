@@ -28,6 +28,16 @@
   <script type="module" src="https://cdn.jsdelivr.net/npm/esp-web-tools@10.4.0/dist/web/install-button.js"></script>
 
   <!--
+    xterm.js (ターミナル画面の描画)。
+    PicoRuby Web Terminal (picoruby.org/terminal) と同じくWeb Serial API経由で
+    実機のUSBシリアルに直結し、ここに表示する。バージョン固定のCDN読み込み方針は
+    他のライブラリと同様。
+  -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/css/xterm.css">
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/lib/xterm.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.11.0/lib/addon-fit.js"></script>
+
+  <!--
     Ruby(Funicular)側から呼ぶための薄いJSラッパ。
     Prismの細かい作法(文法オブジェクトの取り出し、末尾改行の補正)はここに閉じ込めて、
     Ruby側は funicularHighlight(code, lang) だけ知っていればよい状態にする。
