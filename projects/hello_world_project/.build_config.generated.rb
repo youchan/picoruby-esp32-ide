@@ -1,5 +1,5 @@
 # picoruby-esp32-ide が自動生成する部分(mrbgems/以下のgemを追加する)
-conf.gem gemdir: "/projects/hello_world_project/mrbgems/picoruby_hello_world"
+conf.gem gemdir: "/project_src/mrbgems/picoruby_hello_world"
 
 # ここから下は build_config.rb の内容
 # このプロジェクト固有のビルド設定。

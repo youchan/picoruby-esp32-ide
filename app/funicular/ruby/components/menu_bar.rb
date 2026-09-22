@@ -11,8 +11,6 @@
 # props[:on_project_select] / props[:on_settings] / props[:on_setup] /
 # props[:on_build] 経由で親(EditorApp)に委譲する。
 class MenuBar < Funicular::Component
-  MANIFEST_PATH = '/api/firmware/manifest.json'
-
   STATUS_LABELS = {
     'idle' => 'ビルド未実行',
     'running' => 'ビルド中…',
@@ -116,11 +114,19 @@ class MenuBar < Funicular::Component
 
   # 実際の書き込み処理はブラウザのWeb Serial API経由でESP Web Tools
   # (esp-web-install-button カスタム要素)が行う。旧 install_panel.rb と同じ使い方。
+  # ビルド成果物がプロジェクトごとに分かれた(r2p2_state_dir参照)ので、
+  # マニフェストURLにも現在のプロジェクトをクエリパラメータとして含める。
   def render_install_button
-    tag(:'esp-web-install-button', manifest: MANIFEST_PATH) do
-      button(slot: 'activate', class: 'menu-install') { 'デバイスにインストール' }
-      span(slot: 'unsupported', class: 'menu-bar-hint') { '未対応ブラウザ' }
-      span(slot: 'not-allowed', class: 'menu-bar-hint') { 'HTTPS必須' }
+    current_project = props[:current_project]
+    if current_project.to_s.empty?
+      button(class: 'menu-install', disabled: true) { 'デバイスにインストール' }
+    else
+      manifest_path = "/api/firmware/manifest.json?project=#{encode(current_project)}"
+      tag(:'esp-web-install-button', manifest: manifest_path) do
+        button(slot: 'activate', class: 'menu-install') { 'デバイスにインストール' }
+        span(slot: 'unsupported', class: 'menu-bar-hint') { '未対応ブラウザ' }
+        span(slot: 'not-allowed', class: 'menu-bar-hint') { 'HTTPS必須' }
+      end
     end
   end
 
@@ -131,5 +137,9 @@ class MenuBar < Funicular::Component
   def value_of(data, key)
     return nil unless data
     data[key] || data[key.to_sym]
+  end
+
+  def encode(str)
+    JS.global.encodeURIComponent(str).to_s
   end
 end

@@ -25,6 +25,10 @@ class BackgroundJob
     started
   end
 
+  def running?
+    @mutex.synchronize { @state[:status] == "running" }
+  end
+
   def to_response_json
     @mutex.synchronize do
       full_log = @state[:log]

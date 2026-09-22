@@ -227,39 +227,17 @@ READMEにも記載しているが、Claude Codeで次に着手する際の候補
   今後もCDN経由でJSライブラリを追加する場合は、安定版の `<script>` タグ+バージョン固定URLを
   優先する方針でよい
 
-### Dockerでの開発時マウント(`bin/dev`)
+### `bin/dev`は廃止した(`bin/server`に置き換え)
 
-開発中に `app/` をbind mountしてホスト側の編集を即座に反映したい、という要望があった。
-`app/` のコピー先を `/root` → `/root/app` に変更して `-v $(pwd)/app:/root/app` の
-1行で済ませる案も試したが、`app.rb` の `PROJECTS_ROOT` / `R2P2_ESP32_ROOT` が
-`File.expand_path("../projects", __dir__)` のように `__dir__`(=app.rbの場所)からの
-相対パスで解決しているため、`app/` を1階層深くすると `../projects` の解決先が
-`/projects` から `/root/projects` にズレて `Errno::ENOENT` になる問題が出た
-(`R2P2_ESP32_ROOT` も同様)。Dockerfile側でsymlinkを張って辻褄を合わせる案も
-検討したが、Dockerfileに手を入れるほどのことではないと判断し、**Dockerfileは
-`COPY app/ .`(WORKDIR `/root`)のまま変更せず**、代わりに開発用の起動コマンドを
-`bin/dev` というシェルスクリプトに切り出した。
-
-```bash
-./bin/dev
-```
-
-中身は `app/` 配下のサブディレクトリを個別に(Dockerfileの配置に合わせて)
-`/root` 直下へマウントするだけの `docker run` ラッパー。Rakefileにして
-`rake dev` のようなタスクにする案もあったが、Webアプリの起動ラッパー程度で
-rake依存を持ち込む必要はない(R2P2-ESP32側の `Rakefile`/`rakelib/docker.rake` は
-ESP-IDFのビルドタスク管理のためのもので、役割が異なる)と判断し見送った。
-
-- `views/index.erb` ・ `public/css` ・ `funicular/ruby/*.rb` はリクエストのたびに
-  読み直される(ERBレンダリング / `File.read`)ので、マウント元を編集してブラウザを
-  リロードするだけで反映される
-- `app.rb` 自体(ルーティング等)を変更した場合はSinatra起動時に読み込まれるため、
-  コンテナの再起動が必要
-- コンテナはroot権限で動くため、UI経由の保存(`POST /api/file`)でホスト側に
-  書き込まれるファイルはroot所有になる点に注意
-- `R2P2-ESP32/` はデフォルトではマウント対象外(イメージビルド時にセットアップ済みの
-  ものをそのまま使う)。ソースも編集したい場合は `bin/dev` に
-  `-v "$(pwd)/R2P2-ESP32:/R2P2-ESP32"` を追加する
+**この節は古い(Dockerオンリー時代の)記述で、現在は成り立たない。** `bin/dev`は
+Sinatraアプリ自体をDockerコンテナの中で動かす前提のスクリプトだったが、後述の
+「Sinatraのホスト外出し」でSinatra自体はDockerを使わずホストでネイティブに動く
+ようになったため、このマウントの工夫は丸ごと不要になり`bin/dev`は削除した。
+開発時の起動は`bin/server`(`bundle exec ruby app.rb`をラップするだけ)を使う。
+過去に踏んだ罠の記録として残しておくと: 当時`app/`を`/root/app`のように1階層
+深くマウントしようとして、`PROJECTS_ROOT`が`__dir__`からの相対パス解決だった
+ために`../projects`の解決先がズレる問題があった。今は`PROJECTS_ROOT`自体が
+環境変数で上書き可能になっているので、同種の問題はもう起きない。
 
 ## プロジェクト管理・mrbgemのビルド組み込み方針
 
@@ -451,3 +429,114 @@ ESP Component Registryを見る別の仕組みなので影響を受けない)。
   `.config.yml`を読み直す(`select_project`から呼ぶ)。切り替え中に古いレスポンスが
   後から返ってきて新しいプロジェクトの設定を上書きしないよう、レスポンス受信時に
   `state[:current_project]`と一致するかを確認してから反映している
+
+## Sinatraのホスト外出し・Dockerのビルド専用化(大規模アーキテクチャ変更)
+
+これまでは「Sinatraアプリ・R2P2-ESP32・ESP-IDFすべてを1つのDockerイメージに
+焼き込み、そのコンテナ内でアプリごと動かす」という構成だった。これを
+「**Sinatraはホストでネイティブに動かし、Dockerはビルド専用**」という構成に
+変更した。GitHubのdocsで実際に議論して固めた方針で、詳しい経緯・比較検討は
+このセッションの会話に残っている。要点だけ書くと:
+
+- 対象ユーザーがRuby開発者である以上「Rubyの実行環境がある」ことはハードルに
+  ならない。むしろ「アプリ全体がDocker前提」であることのほうがハードルが高い
+- ESP-IDFのビルド環境はセットアップが重く複雑なので、Dockerで隠蔽する価値が高い
+  (=ここだけはDockerに残す価値がある)
+- 「ビルドキャッシュ・sdkconfig・managed_componentsをプロジェクトごとに持たせたい」
+  (ターゲットやVMが違うプロジェクトを切り替えるたびに実質フルリビルドになる問題)
+  という要望から、**ビルドのたびに使い捨てコンテナを起動する**設計になった。
+  これによりDockerソケット共有(DooD)のような複雑さも不要になった
+  (Sinatraがホストの通常プロセスとして`docker run`を呼ぶだけで済むため)
+
+### 新しい構成
+
+- `Dockerfile` — ESP-IDFツールチェインだけを持つビルド専用イメージ(後述)。
+  `docker build -t picoruby-esp32-ide-builder .` で事前にビルドしておく
+- `bin/server` — Sinatraをホストでネイティブに起動するスクリプト
+  (`bundle exec ruby app.rb`のラッパー)。旧`bin/dev`は削除した
+- `app/r2p2_state.rb` — プロジェクトごとのR2P2-ESP32状態を管理するモジュール
+  (詳細後述)
+- `PROJECTS_ROOT` / `R2P2_STATE_ROOT` / `PICORUBY_BUILDER_IMAGE` (`app.rb`) —
+  いずれも環境変数で上書き可能。特に`PROJECTS_ROOT`が設定可能になったことで、
+  当初の目的だった「プロジェクトをホストの好きな場所に置きたい」が実現している
+
+### プロジェクトごとのR2P2-ESP32状態(`app/r2p2_state.rb`)
+
+以前は1つのR2P2-ESP32チェックアウトを全プロジェクトで共有していたが、これを
+プロジェクトごとに独立させた。状態ディレクトリは`R2P2_STATE_ROOT`
+(既定`~/.picoruby-esp32-ide/r2p2-esp32/`)配下に`<project名>`で1つずつ持つ
+(プロジェクト本体の外に置く。R2P2-ESP32はサイズが大きく、ユーザーのプロジェクト
+gitリポジトリに混ざるべきではないため)。
+
+以前Dockerfileの`RUN`でイメージビルド時に1回だけ実行していた
+
+- R2P2-ESP32のgit clone
+- build_config.rbフックのパッチ(`conf.instance_eval(...)`を4ファイルの`end`直前に挿入)
+- `main/idf_component.yml`のjoltwallet/littlefsバージョン固定
+
+は、`R2P2State.ensure_checkout(state_dir)`として**プロジェクトが初めてその
+状態ディレクトリを使うとき**に動的に実行する処理になった。パッチ処理は
+シェルのワンライナー(`head -n -1` / `printf` / `mv`)から素のRubyコードに
+書き直した。理由は、プロジェクトごとに動的に実行する処理としてRubyで書く方が
+自然なのに加え、このセッションで2度踏んだシェルエスケープバグ
+(`\&\&`が生成コードに混入してSyntaxError)を構造的に避けられるため。
+
+### ビルド/セットアップの実行(`r2p2_docker_command`)
+
+`POST /api/build` / `POST /api/platform`は、ビルド開始直前に
+`R2P2State.ensure_checkout`(未チェックアウトならここでgit clone、数分かかる)
+してから、`r2p2_docker_command(state_dir, project_root, inner_cmd)`が組み立てる
+`docker run --rm -v <state_dir>:/R2P2-ESP32 -v <project_root>:/project_src
+<BUILDER_IMAGE> bash -c '...'`を`BackgroundJob`(変更なし)で実行する。
+
+- `BackgroundJob`(`Open3.popen2e`でサブプロセスの標準出力を逐次読む仕組み)は
+  **無変更で流用できた**。`docker run`もただのサブプロセスでしかないので、
+  リアルタイムのログストリーミングはそのまま動く
+- `PROJECT_BUILD_CONFIG`環境変数や、mrbgemの`conf.gem gemdir:`に書くパスは、
+  **コンテナ内から見たパス**(`/project_src/...`、`CONTAINER_PROJECT_MOUNT`)に
+  変わった。ホスト側の実パスではない点に注意(以前は同じプロセス内で完結していた
+  ので気にする必要がなかった)
+- `sdkconfig_has_usb_console?`・ファームウェア配信(`GET /api/firmware/*`)・
+  `storage/home/`へのapp.rbコピーは、参照するパスを`state_dir`(プロジェクトごと)
+  に差し替えるだけで、**ファイルI/Oのロジック自体は変更していない**。R2P2-ESP32の
+  状態をホストの実ディレクトリにbind mountする設計(named volumeではなく)に
+  したことで、Sinatra(ホスト上で動く)は今まで通り`File.read`/`Dir.glob`で
+  直接読める
+- ファームウェア配信系(`GET /api/firmware/manifest.json`・`GET /api/firmware/*`)は
+  プロジェクトごとにビルド成果物の場所が変わったので、`project`クエリパラメータが
+  必須になった(以前は不要だった)。マニフェストの`parts[].path`にも
+  `?project=...`を埋め込んで、ESP Web Tools側からのファイル取得時にも
+  引き継がれるようにしてある
+- `docker run`前に`builder_image_available?`(`docker image inspect`)で
+  ビルド用イメージの存在を確認し、無ければビルド方法を案内するエラーを返す
+
+### `Dockerfile`(ビルド専用イメージ)で実際に踏んだ罠
+
+Ruby/rbenv/R2P2-ESP32を全部イメージから追い出して「ESP-IDFツールチェインだけ」
+にすれば十分だろうと考えていたが、実際に`rake setup_esp32`を通しで実行してみたら
+2つ想定外のエラーが出た(**目視だけでなく実際にビルド→実行して検証したことで
+発見できた**、この種のバグは動かしてみないと分からない典型):
+
+1. **`git`の`dubious ownership`エラー**: bind mountしたディレクトリはホスト側の
+   実UIDのまま見えるため、コンテナ内のユーザーとの所有者不一致でgit
+   2.35.2以降(CVE-2022-24765対策)が操作を拒否する。
+   `git config --system --add safe.directory '*'`をイメージビルド時に実行して解決
+   (bind mountされるパスは実行のたびに変わるプロジェクトごとの状態ディレクトリ
+   なので、個別許可ではなく全許可にした。ビルド専用の使い捨てコンテナでしか
+   使わないイメージなので安全性への影響は無視できる)
+2. **`bundle: command not found`(exit 127)**: R2P2-ESP32の`rakelib/setup.rake`は
+   内部で(mrubyをビルドするために)picorubyサブモジュール内で`bundle install`を
+   呼ぶ。ベースイメージ(`espressif/idf`)にはシステムRubyがあり`bundler`ライブラリも
+   デフォルトgemとして入っているが、`bundle`コマンドの実行ファイルは生成されて
+   いなかった。`gem install bundler --no-document`で解決
+3. **ネイティブ拡張のビルド失敗(`mkmf.rb can't find header files for ruby`)**:
+   上記の`bundle install`がracc/ffi/io-console/json等ネイティブ拡張を持つgemを
+   ビルドしようとするが、ベースイメージにはコンパイラもRubyのヘッダファイルも
+   無い。`apt-get install build-essential ruby-dev libssl-dev libreadline-dev
+   zlib1g-dev libyaml-dev libffi-dev`で解決(奇しくも、Ruby自体をrbenvで
+   ソースからビルドしていた旧Dockerfileでは同じパッケージ群が副次的に必要
+   だったため、apt-getのパッケージリスト自体は実質同じものが必要だった)
+
+いずれも`docker build` → 実際に`rake setup_esp32`を`docker run`経由で実行して
+初めて見つかったバグ。`ruby -c`のような静的チェックでは検出できない類のもの
+なので、Dockerfileを変更したときは必ず実際にビルド〜実行まで通すこと。

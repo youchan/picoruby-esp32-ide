@@ -4,7 +4,9 @@ require "open3"
 require "shellwords"
 require "fileutils"
 require "yaml"
+require "uri"
 require_relative "background_job"
+require_relative "r2p2_state"
 
 set :public_folder, File.join(__dir__, "public")
 set :views, File.join(__dir__, "views")
@@ -23,9 +25,30 @@ else
   end
 end
 
-PROJECTS_ROOT = File.expand_path("../projects", __dir__)
+# プロジェクトを置く場所。既定はこのリポジトリ直下のprojects/だが、
+# Sinatraをホストでネイティブに動かす(Dockerはビルド専用)構成にしたことで
+# 「プロジェクトをホストの好きな場所に置きたい」が実現できるようになったので、
+# 環境変数で上書きできるようにしてある。
+PROJECTS_ROOT = File.expand_path(ENV.fetch("PROJECTS_ROOT", File.join(__dir__, "..", "projects")))
 FUNICULAR_ROOT = File.expand_path("funicular", __dir__)
-R2P2_ESP32_ROOT = File.expand_path("../R2P2-ESP32", __dir__)
+
+# プロジェクトごとに独立したR2P2-ESP32のビルド状態(sdkconfig・build/・
+# managed_components等)を置くディレクトリ名。「プロジェクトディレクトリの中に
+# 置きたい、gitには含めたくない、UI上のファイル一覧にも出したくない」という
+# 要望から、プロジェクト直下のドット始まりのディレクトリにしてある。
+# `.`始まりのパスは`Dir.glob("**/*")`が中身ごと辿らない(GET /api/files参照)ので、
+# 特別なフィルタ処理を書かなくてもUI上には出てこない。
+R2P2_STATE_DIRNAME = ".r2p2-esp32"
+
+# idf.py build / rake setup_xxx を実行するビルド専用イメージ(Dockerfile参照)。
+# `docker build -t #{BUILDER_IMAGE} .` で事前にビルドしておく必要がある。
+BUILDER_IMAGE = ENV.fetch("PICORUBY_BUILDER_IMAGE", "picoruby-esp32-ide-builder")
+
+# ビルド専用コンテナの中で、プロジェクト本体・R2P2-ESP32の状態をそれぞれ
+# bind mountする先の固定パス。ホスト側の実パスとコンテナ内パスの対応は
+# この2つの定数を通じて一箇所にまとめておく(r2p2_docker_command参照)。
+CONTAINER_PROJECT_MOUNT = "/project_src"
+CONTAINER_R2P2_MOUNT = "/R2P2-ESP32"
 
 ALLOWED_EXTENSIONS = %w[.rb .c .h .rake].freeze
 PLATFORM_TARGETS = %w[esp32 esp32c3 esp32c6 esp32h2 esp32p4 esp32s3].freeze
@@ -47,15 +70,6 @@ BUILD_CONFIG_FILENAME = "build_config.rb"
 # build_config.rbの内容をそのまま連結したもの(ユーザーが書いたbuild_config.rb自体は
 # 書き換えない)。
 GENERATED_BUILD_CONFIG_FILENAME = ".build_config.generated.rb"
-
-# appプロジェクトのapp/以下を起動スクリプトとして実機で動かすための仕組み。
-# R2P2-ESP32はmain/CMakeLists.txtの`littlefs_create_partition_image`でR2P2-ESP32/storage/
-# 以下をそのままstorageパーティション(littlefs)のイメージにし、起動スクリプト
-# (components/picoruby-esp32/mrblib/main_task.rb)が起動のたびに
-# `/home/app.rb`(=storage/home/app.rb)を自動でloadする、というR2P2本来の仕組みが
-# 既にある。そのため main_task.rb 側の改造は不要で、ビルド直前にprojectのapp/以下を
-# storage/home/へまるごとコピーするだけでよい。
-STORAGE_HOME_DIR = File.join(R2P2_ESP32_ROOT, "storage", "home")
 
 BUILD_JOB = BackgroundJob.new
 PLATFORM_JOB = BackgroundJob.new
@@ -85,6 +99,30 @@ helpers do
       raise ArgumentError, "invalid path"
     end
     full
+  end
+
+  # プロジェクトごとのR2P2-ESP32状態ディレクトリの絶対パス。
+  # root は project_root で解決済みのプロジェクト本体の絶対パスを渡すこと。
+  def r2p2_state_dir(root)
+    File.join(root, R2P2_STATE_DIRNAME)
+  end
+
+  # .gitignoreを(プロジェクト内に無ければ作成、あれば足りない行だけ追記して)
+  # 用意する。R2P2-ESP32の状態やビルド生成物をプロジェクトのgit管理に含めたくない、
+  # という要望から、プロジェクトの中に状態を置くようにした以上セットで必要になる。
+  # 既存の.gitignoreの中身(ユーザー自身が書いた分)は壊さない。
+  def ensure_project_gitignore(root)
+    entries = ["#{R2P2_STATE_DIRNAME}/", GENERATED_BUILD_CONFIG_FILENAME]
+    path = File.join(root, ".gitignore")
+    existing = File.file?(path) ? File.read(path) : ""
+    existing_lines = existing.lines.map(&:chomp)
+    missing = entries.reject { |entry| existing_lines.include?(entry) }
+    return if missing.empty?
+
+    File.open(path, "a") do |f|
+      f.puts if !existing.empty? && !existing.end_with?("\n")
+      missing.each { |entry| f.puts(entry) }
+    end
   end
 
   def json_error(status, message)
@@ -277,17 +315,22 @@ end
 # PROJECT_BUILD_CONFIG経由で渡す。gemdir(自作mrbgemの絶対パス)は常にコンテナ内の
 # 絶対パスで書く(相対パス解決の基点があいまいなmruby側の挙動に依存しないため)。
 
-def project_mrbgem_paths(root)
+# mrbgems/直下のディレクトリ名一覧を返す(存在チェック・列挙はホスト側のrootを見る)。
+def project_mrbgem_names(root)
   mrbgems_dir = File.join(root, MRBGEMS_DIRNAME)
   return [] unless Dir.exist?(mrbgems_dir)
 
   Dir.children(mrbgems_dir).select { |name| File.directory?(File.join(mrbgems_dir, name)) }.sort
-    .map { |name| File.join(mrbgems_dir, name) }
 end
 
 def generated_build_config_content(root)
   lines = ["# picoruby-esp32-ide が自動生成する部分(#{MRBGEMS_DIRNAME}/以下のgemを追加する)"]
-  project_mrbgem_paths(root).each { |path| lines << "conf.gem gemdir: #{path.inspect}" }
+  project_mrbgem_names(root).each do |name|
+    # gemdirはビルドコンテナの中から見たパス(CONTAINER_PROJECT_MOUNT配下)で書く。
+    # ホスト側の実パスではない点に注意(r2p2_docker_commandでproject_srcとしてマウントする)。
+    container_path = File.join(CONTAINER_PROJECT_MOUNT, MRBGEMS_DIRNAME, name)
+    lines << "conf.gem gemdir: #{container_path.inspect}"
+  end
 
   build_config_path = File.join(root, BUILD_CONFIG_FILENAME)
   if File.file?(build_config_path)
@@ -299,13 +342,54 @@ def generated_build_config_content(root)
   lines.join("\n") + "\n"
 end
 
-# idf.py / rake は ESP-IDF の export.sh を読み込んだシェルでしか使えない。
-# コンテナのエントリポイントで export 済みの環境ならそのまま動くが、
-# (docker exec 経由など)export されていない場合に備えて明示的に読み込む。
-def r2p2_shell_command(inner_cmd)
-  "cd #{Shellwords.escape(R2P2_ESP32_ROOT)} && " \
-    "if [ -n \"$IDF_PATH\" ] && [ -f \"$IDF_PATH/export.sh\" ]; then " \
-    ". \"$IDF_PATH/export.sh\" > /dev/null; fi && #{inner_cmd}"
+# ビルド専用コンテナ(BUILDER_IMAGE)を使い捨てで起動し、その中でinner_cmdを
+# 実行するコマンド文字列を組み立てる。state_dir(プロジェクトごとのR2P2-ESP32状態)を
+# CONTAINER_R2P2_MOUNTに、project_root(mrbgems/やapp/を含むプロジェクト本体)を
+# CONTAINER_PROJECT_MOUNTにbind mountする。
+#
+# idf.py / rake は ESP-IDF の export.sh を読み込んだシェルでしか使えないため、
+# コンテナ内で明示的に読み込んでから inner_cmd を実行する。
+#
+# コンテナは(`--user`を付けず)デフォルトのrootで動かす。rakelib/setup.rakeが
+# 内部で呼ぶ`bundle install`がシステムのgemディレクトリ(/var/lib/gems/...)へ
+# 書き込む必要があり、`--user <非root>`にすると権限エラーで失敗することを
+# 実際に確認したため(root専用のシステムgemパスを使っている以上、非rootでは
+# そもそも動かせない)。その代わり、bind mountしたstate_dir配下がroot所有のまま
+# ホストに残ってプロジェクトディレクトリの持ち主(ホストユーザー)から扱いにくく
+# なる問題(実際に`.config.yml`のroot所有・stateディレクトリの再構築で発生)を
+# 避けるため、コマンド完了後に必ず`chown`でホストユーザーの所有に戻す
+# (`;`でつないでinner_cmdの成否に関わらず実行し、`inner_cmd`自体の終了コードは
+# `$?`で保持して最後に`exit`し直すことで、chown自体の成否でBUILD_JOBの成功/失敗
+# 判定が変わらないようにしている)。
+def r2p2_docker_command(state_dir, project_dir, inner_cmd)
+  chown_target = "#{Process.uid}:#{Process.gid}"
+  full_inner_cmd =
+    ". \"$IDF_PATH/export.sh\" > /dev/null && cd #{Shellwords.escape(CONTAINER_R2P2_MOUNT)} && " \
+    "#{inner_cmd}; " \
+    "exit_code=$?; " \
+    "chown -R #{chown_target} #{Shellwords.escape(CONTAINER_R2P2_MOUNT)}; " \
+    "exit $exit_code"
+
+  "docker run --rm " \
+    "-v #{Shellwords.escape(state_dir)}:#{CONTAINER_R2P2_MOUNT} " \
+    "-v #{Shellwords.escape(project_dir)}:#{CONTAINER_PROJECT_MOUNT} " \
+    "#{Shellwords.escape(BUILDER_IMAGE)} " \
+    "bash -c #{Shellwords.escape(full_inner_cmd)}"
+end
+
+# BUILDER_IMAGEがローカルに存在するかどうか。無いままdocker runすると
+# 分かりにくいエラーになるので、事前にチェックして案内を出せるようにする。
+def builder_image_available?
+  system("docker", "image", "inspect", BUILDER_IMAGE, out: File::NULL, err: File::NULL)
+end
+
+# R2P2State.ensure_checkout は git clone 等に失敗すると例外を投げる
+# (R2P2State.run! 参照)。Sinatraのリクエストハンドラ内で素通しすると生の500に
+# なってしまうので、json_errorでラップする。
+def ensure_r2p2_checkout!(state_dir)
+  R2P2State.ensure_checkout(state_dir)
+rescue StandardError => e
+  json_error(500, "R2P2-ESP32のセットアップに失敗しました: #{e.message}")
 end
 
 # R2P2-ESP32 のビルド状態(実行中/成功/失敗/未実行)とログを返す。
@@ -324,8 +408,8 @@ USB_CONSOLE_SDKCONFIG_DEFAULTS = "sdkconfig.defaults;sdkconfigs/usb_console"
 
 # 現在の sdkconfig が USB Console設定でビルドされているかどうか。
 # sdkconfigが無い(セットアップ直後、または一度もビルドしていない)場合はfalse扱い。
-def sdkconfig_has_usb_console?
-  sdkconfig_path = File.join(R2P2_ESP32_ROOT, "sdkconfig")
+def sdkconfig_has_usb_console?(state_dir)
+  sdkconfig_path = File.join(state_dir, "sdkconfig")
   return false unless File.file?(sdkconfig_path)
 
   File.foreach(sdkconfig_path).any? { |line| line.start_with?("CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y") }
@@ -334,7 +418,9 @@ end
 # R2P2-ESP32 のビルド(idf.py build)をバックグラウンドで開始する。
 # 実行中に重ねて叩かれた場合は 409 を返す(同時に複数走らせない)。
 # VM・USB Consoleはリクエストでは受け取らず、そのプロジェクトの`.config.yml`
-# (read_project_config)に保存されている値をそのまま使う。
+# (read_project_config)に保存されている値をそのまま使う。R2P2-ESP32の状態は
+# プロジェクトごとに独立している(r2p2_state_dir)ので、初回はここでgit clone
+# (R2P2State.ensure_checkout)が走り、数分かかることがある。
 #
 # body(JSON):
 #   project: "hello_world_project" のようなプロジェクト名(必須)。app/以下を
@@ -361,14 +447,31 @@ post "/api/build" do
       json_error(400, "invalid project")
     end
 
-  # そのprojectのapp/以下を実機の起動スクリプトにする(STORAGE_HOME_DIR参照)。
-  # 前回別プロジェクトをビルドしたときの残骸が残らないよう、まずstorage/home/を
-  # 空にしてからコピーし直す。
-  FileUtils.mkdir_p(STORAGE_HOME_DIR)
-  FileUtils.rm_rf(Dir.glob(File.join(STORAGE_HOME_DIR, "*")))
+  # BUILD_JOB/PLATFORM_JOBは別々のロックなので、これが無いと「ビルド中に別の
+  # リクエストでプラットフォームセットアップ(rake setup_xxxのdeep_clean)を始める」
+  # ことを防げず、同じプロジェクトのR2P2-ESP32状態ディレクトリを2つのdocker run
+  # コンテナが同時に書き換えてしまう(実際に発生し、ビルド中のファイルが
+  # セットアップのdeep_cleanで消えてErrno::ENOENTになった)。
+  json_error(409, "platform setup is running") if PLATFORM_JOB.running?
+
+  unless builder_image_available?
+    json_error(500, "ビルド用イメージ #{BUILDER_IMAGE} が見つかりません。" \
+      "docker build -t #{BUILDER_IMAGE} . を実行してください")
+  end
+
+  state_dir = r2p2_state_dir(root)
+  ensure_project_gitignore(root)
+  ensure_r2p2_checkout!(state_dir)
+
+  # そのprojectのapp/以下を実機の起動スクリプトにする(storage/home/を参照する
+  # R2P2本来の仕組み。詳細は上のコメント参照)。前回このプロジェクトをビルドした
+  # ときの残骸が残らないよう、まずstorage/home/を空にしてからコピーし直す。
+  storage_home_dir = File.join(state_dir, "storage", "home")
+  FileUtils.mkdir_p(storage_home_dir)
+  FileUtils.rm_rf(Dir.glob(File.join(storage_home_dir, "*")))
   project_app_dir = File.join(root, APP_DIRNAME)
   if Dir.exist?(project_app_dir)
-    FileUtils.cp_r(Dir.glob(File.join(project_app_dir, "*")), STORAGE_HOME_DIR)
+    FileUtils.cp_r(Dir.glob(File.join(project_app_dir, "*")), storage_home_dir)
   end
 
   project_config = read_project_config(root)
@@ -380,11 +483,13 @@ post "/api/build" do
 
   # projects/<project>/mrbgems/以下の現在の一覧とbuild_config.rbから、実際に
   # R2P2-ESP32へ渡すファイルをビルドのたびに作り直す(generated_build_config_content参照)。
+  # PROJECT_BUILD_CONFIGにはコンテナ内から見たパスを渡す(ホスト側の実パスではない)。
   generated_build_config = File.join(root, GENERATED_BUILD_CONFIG_FILENAME)
   File.write(generated_build_config, generated_build_config_content(root))
-  env_assignments = ["PROJECT_BUILD_CONFIG=#{Shellwords.escape(generated_build_config)}"]
+  container_build_config = File.join(CONTAINER_PROJECT_MOUNT, GENERATED_BUILD_CONFIG_FILENAME)
+  env_assignments = ["PROJECT_BUILD_CONFIG=#{Shellwords.escape(container_build_config)}"]
 
-  if usb_console != sdkconfig_has_usb_console?
+  if usb_console != sdkconfig_has_usb_console?(state_dir)
     # SDKCONFIG_DEFAULTS は sdkconfig ファイルが無いときにしか読まれない仕組みなので、
     # 現在の設定と要求された設定が食い違うときだけ sdkconfig を消してビルドし直す
     # (README.md「If you change SDKCONFIG_DEFAULTS, delete the sdkconfig file and
@@ -392,12 +497,12 @@ post "/api/build" do
     # 値が変わらない限りはこのクリーンビルドを避け、従来通りの差分ビルドのままにする。
     sdkconfig_defaults = usb_console ? USB_CONSOLE_SDKCONFIG_DEFAULTS : "sdkconfig.defaults"
     env_assignments << "SDKCONFIG_DEFAULTS=#{Shellwords.escape(sdkconfig_defaults)}"
-    full_cmd = "rm -f sdkconfig && #{env_assignments.join(' ')} #{build_cmd}"
+    inner_cmd = "rm -f sdkconfig && #{env_assignments.join(' ')} #{build_cmd}"
   else
-    full_cmd = env_assignments.empty? ? build_cmd : "#{env_assignments.join(' ')} #{build_cmd}"
+    inner_cmd = env_assignments.empty? ? build_cmd : "#{env_assignments.join(' ')} #{build_cmd}"
   end
 
-  started = BUILD_JOB.start(r2p2_shell_command(full_cmd))
+  started = BUILD_JOB.start(r2p2_docker_command(state_dir, root, inner_cmd))
   json_error(409, "build already running") unless started
 
   { status: "ok" }.to_json
@@ -439,7 +544,19 @@ post "/api/platform" do
   platform = read_project_config(root)["platform"]
   json_error(400, "platform is not configured for this project") if platform.to_s.empty?
 
-  started = PLATFORM_JOB.start(r2p2_shell_command("rake setup_#{platform}"))
+  # BUILD_JOBとの同時実行を防ぐ理由はPOST /api/build側のコメント参照。
+  json_error(409, "build is running") if BUILD_JOB.running?
+
+  unless builder_image_available?
+    json_error(500, "ビルド用イメージ #{BUILDER_IMAGE} が見つかりません。" \
+      "docker build -t #{BUILDER_IMAGE} . を実行してください")
+  end
+
+  state_dir = r2p2_state_dir(root)
+  ensure_project_gitignore(root)
+  ensure_r2p2_checkout!(state_dir)
+
+  started = PLATFORM_JOB.start(r2p2_docker_command(state_dir, root, "rake setup_#{platform}"))
   json_error(409, "platform setup already running") unless started
 
   { status: "ok", platform: platform }.to_json
@@ -449,7 +566,9 @@ end
 # (https://esphome.github.io/esp-web-tools/、index.html でCDN読み込み)経由の
 # ブラウザのWeb Serial APIで行う。サーバはビルド成果物からマニフェストと.binを
 # 配信するだけで、実際の書き込み処理はブラウザ側(esp-web-install-button)が担う。
-FIRMWARE_BUILD_DIR = File.join(R2P2_ESP32_ROOT, "build")
+# ビルド成果物はプロジェクトごとのR2P2-ESP32状態ディレクトリ(r2p2_state_dir)の下、
+# `build/`にある。プロジェクトが分かれた都合で、この2つのエンドポイントは
+# どちらも`project`パラメータを要求する。
 
 # idf.py set-target のターゲット名 → ESP Web Tools の chipFamily 名。
 # ESP Web Tools が対応しているチップ一覧(esp-web-tools/src/const.ts の Build#chipFamily)
@@ -463,6 +582,10 @@ CHIP_FAMILY_MAP = {
   "esp32s3" => "ESP32-S3"
 }.freeze
 
+def firmware_build_dir(root)
+  File.join(r2p2_state_dir(root), "build")
+end
+
 # ESP Web Tools 用のマニフェストを、直近のビルド成果物
 # (build/project_description.json の "target" と build/flash_args)から動的に組み立てる。
 # flash_args は `idf.py build` が生成する、esptool write_flash にそのまま渡せる
@@ -470,14 +593,26 @@ CHIP_FAMILY_MAP = {
 get "/api/firmware/manifest.json" do
   content_type :json
 
-  desc_path = File.join(FIRMWARE_BUILD_DIR, "project_description.json")
-  flash_args_path = File.join(FIRMWARE_BUILD_DIR, "flash_args")
+  project_name = params[:project]
+  json_error(400, "project is required") if project_name.to_s.empty?
+
+  root =
+    begin
+      project_root(project_name)
+    rescue ArgumentError
+      json_error(400, "invalid project")
+    end
+
+  build_dir = firmware_build_dir(root)
+  desc_path = File.join(build_dir, "project_description.json")
+  flash_args_path = File.join(build_dir, "flash_args")
   json_error(404, "not built yet") unless File.file?(desc_path) && File.file?(flash_args_path)
 
   target = JSON.parse(File.read(desc_path))["target"]
   chip_family = CHIP_FAMILY_MAP[target]
   json_error(500, "unsupported target: #{target}") unless chip_family
 
+  encoded_project = URI.encode_www_form_component(project_name)
   parts = File.readlines(flash_args_path).drop(1).filter_map do |line|
     line = line.strip
     next if line.empty?
@@ -486,7 +621,7 @@ get "/api/firmware/manifest.json" do
     # rel_path は "bootloader/bootloader.bin" のようにサブディレクトリを含むことがある。
     # basename に切り詰めると実体(build/bootloader/bootloader.bin)と食い違って
     # 404になるため、相対パスのままURLに使う(下の配信ルート側もそれに合わせてある)。
-    { path: "/api/firmware/#{rel_path}", offset: Integer(offset_hex, 16) }
+    { path: "/api/firmware/#{rel_path}?project=#{encoded_project}", offset: Integer(offset_hex, 16) }
   end
 
   {
@@ -504,9 +639,19 @@ get "/api/firmware/*" do
   rel_path = params[:splat].first
   json_error(400, "invalid filename") unless rel_path.end_with?(".bin")
 
+  project_name = params[:project]
+  json_error(400, "project is required") if project_name.to_s.empty?
+
+  root =
+    begin
+      project_root(project_name)
+    rescue ArgumentError
+      json_error(400, "invalid project")
+    end
+
   full =
     begin
-      safe_path(FIRMWARE_BUILD_DIR, rel_path)
+      safe_path(firmware_build_dir(root), rel_path)
     rescue ArgumentError
       json_error(400, "invalid path")
     end
