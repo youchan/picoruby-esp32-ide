@@ -14,10 +14,14 @@ app/funicular/
 └── ruby/
     ├── main.rb                    # Funicular.start(EditorApp, container: 'app')
     └── components/
-        ├── file_list.rb           # サイドバーのファイル一覧(表示専用)
+        ├── tree_view.rb           # 汎用ツリー表示(表示専用。ファイル一覧に限らない)
         ├── toolbar.rb             # ファイル名・保存ボタン・ステータス(表示専用)
-        └── editor_app.rb          # ルート。状態とサーバ通信はすべてここ
+        └── editor_app.rb          # ルート。状態・サーバ通信・ターミナルはすべてここ
 ```
+
+(この一覧はサンプルの主要ファイルのみ。実際には `menu_bar.rb` `log_panel.rb`
+`project_settings_dialog.rb` 等もある。最新の一覧は `views/index.erb` の
+`<script type="text/ruby">` タグの並びを見るのが確実)
 
 `index.html` の `<script type="text/ruby" src="...">` は**書いた順に実行される**ので、
 子コンポーネント → ルート → `main.rb` の順に並べること。
@@ -38,9 +42,18 @@ $ ruby app/app.rb
 
 ### コンポーネント分割
 
-状態(ファイル一覧・編集中パス・バッファ・保存済み内容)は `EditorApp` が一手に持ち、
-`FileList` と `Toolbar` は props を受け取って描画するだけの表示専用にしている。
-子から親へは props で渡した lambda (`on_select` / `on_save`) を呼び返す。
+状態(ファイル一覧・編集中パス・バッファ・保存済み内容・ターミナル接続状態)は
+`EditorApp` が一手に持ち、`TreeView` と `Toolbar` は props を受け取って描画するだけの
+表示専用にしている。子から親へは props で渡した lambda (`on_select` / `on_save`) を
+呼び返す。
+
+**注意**: 子コンポーネント(`component(SomeClass, ...)`)は、呼び出す親が
+再描画されるたびに `initialize_state` からもう一度作り直される(ルートコンポーネント
+だけがマウント1回を保証される)。そのため「一度だけ初期化して使い回したい副作用」
+(外部ライブラリのインスタンス化、接続、イベントリスナー登録など)を持つロジックは
+子コンポーネントに切り出さず、`EditorApp` 側に書くこと。実際にターミナル機能
+(xterm.js + Web Serial)をこのルールに反して別コンポーネントに切り出した結果、
+「タブを行き来すると接続が切れる」不具合を起こした(詳細は `CLAUDE.md` 参照)。
 
 Funicularのライフサイクルは `initialize_state` → `render` → `component_mounted` →
 (state更新のたび `render` / `component_updated`) → `component_unmounted`。

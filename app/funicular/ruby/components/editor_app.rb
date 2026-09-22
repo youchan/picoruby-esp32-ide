@@ -4,7 +4,7 @@ require 'crc'
 # エディタ全体のルートコンポーネント。
 #
 # 状態(ファイル一覧・編集中のパス・バッファ・保存済み内容)はすべてここが持ち、
-# FileList / Toolbar には props で流すだけの構成にしている。
+# TreeView / Toolbar には props で流すだけの構成にしている。
 #
 # ■ textarea と Prism ハイライトの扱いについて
 #
@@ -53,6 +53,7 @@ class EditorApp < Funicular::Component
       current_project: nil,
       files: [],
       loading_files: false,
+      collapsed_dirs: [],
       current_path: nil,
       content: '',
       saved_content: '',
@@ -136,12 +137,8 @@ class EditorApp < Funicular::Component
 
       div(class: 'app-body') do
         div(class: 'sidebar') do
-          component(FileList,
-            files: state[:files],
-            loading: state[:loading_files],
-            current_path: state[:current_path],
-            on_select: ->(path) { open_file(path) }
-          )
+          h1 { 'Project Files' }
+          render_file_tree
         end
 
         div(class: 'editor-area') do
@@ -269,6 +266,89 @@ class EditorApp < Funicular::Component
 
   def tab_pane_class(key)
     key == state[:editor_tab] ? 'tab-pane' : 'tab-pane hidden'
+  end
+
+  # --- サイドバー(ファイルツリー) ----------------------------------------
+  #
+  # ツリー表示自体は汎用コンポーネント TreeView (tree_view.rb) に任せてあり、
+  # ここでは state[:files](プロジェクト直下からの相対パスのフラットな配列)を
+  # TreeView が期待するノード構造(name/path/type/childrenを持つHash)に
+  # 組み立てる部分と、どのディレクトリを折りたたむかの状態(collapsed_dirs)
+  # だけを持つ。
+
+  def render_file_tree
+    if state[:loading_files]
+      div(class: 'sidebar-message') { '読み込み中…' }
+    elsif state[:files].empty?
+      div(class: 'sidebar-message') { '編集できるファイルがありません' }
+    else
+      component(TreeView,
+        nodes: file_tree_nodes,
+        collapsed: state[:collapsed_dirs],
+        selected: state[:current_path],
+        icon_for: ->(node) { file_tree_icon(node) },
+        on_select: ->(path) { open_file(path) },
+        on_toggle: ->(path) { toggle_tree_dir(path) }
+      )
+    end
+  end
+
+  def toggle_tree_dir(path)
+    collapsed = state[:collapsed_dirs]
+    if collapsed.include?(path)
+      patch(collapsed_dirs: collapsed - [path])
+    else
+      patch(collapsed_dirs: collapsed + [path])
+    end
+  end
+
+  # 拡張子で色分けする既存のバッジ表示(style.cssの.file-icon.rb等)をそのまま使う。
+  # ディレクトリにはアイコンを付けない(TreeView側のキャレットだけで十分なため)。
+  def file_tree_icon(node)
+    return nil if node[:type] == :dir
+
+    ext = extension(node[:name])
+    { class: ext, label: ext }
+  end
+
+  # state[:files] (例: ["app/app.rb", "mrbgems/picoruby_hello_world/mrbgem.rake"]) を
+  # "/" 区切りで分解し、ディレクトリはまとめてネストしたノード配列に組み立てる。
+  # 各階層でディレクトリを先に、それぞれ名前順に並べる。
+  def file_tree_nodes
+    root = {}
+    state[:files].each { |path| insert_file_tree_path(root, path.split('/'), '') }
+    sorted_file_tree_nodes(root)
+  end
+
+  # root は { セグメント名 => { node:, children: {セグメント名 => ...} } } という
+  # 中間表現(最終的な配列に組み立てる前の、パス分解の途中経過を持つ入れ物)。
+  # prefix は「ここまでのセグメントを"/"で連結したパス」で、再帰のたびに伸びていく。
+  def insert_file_tree_path(root, segments, prefix)
+    name = segments[0]
+    path = prefix.empty? ? name : "#{prefix}/#{name}"
+    entry = (root[name] ||= { children: {} })
+
+    if segments.length == 1
+      entry[:node] = { name: name, path: path, type: :file }
+    else
+      entry[:node] ||= { name: name, path: path, type: :dir }
+      insert_file_tree_path(entry[:children], segments[1, segments.length - 1], path)
+    end
+  end
+
+  def sorted_file_tree_nodes(root)
+    names = root.keys.sort
+    dirs = names.select { |name| root[name][:node][:type] == :dir }
+    files = names.select { |name| root[name][:node][:type] == :file }
+
+    (dirs + files).map do |name|
+      node = root[name][:node]
+      if node[:type] == :dir
+        { name: node[:name], path: node[:path], type: :dir, children: sorted_file_tree_nodes(root[name][:children]) }
+      else
+        node
+      end
+    end
   end
 
   # --- ターミナル(xterm.js + Web Serial) --------------------------------
@@ -723,6 +803,7 @@ class EditorApp < Funicular::Component
       current_project: name,
       files: [],
       loading_files: true,
+      collapsed_dirs: [],
       current_path: nil,
       content: '',
       saved_content: '',

@@ -740,3 +740,54 @@ EditorApp直下に置く」設計と全く同じ理由・同じ対処であり�
 必然だった。もし将来また「一度だけ初期化する副作用を持つUI」を追加したくなったら、
 別コンポーネントに切り出さずEditorAppに直接書くか、少なくともこの制約を
 踏まえた設計にすること。
+
+## サイドバーのファイル一覧をツリー表示にした(TreeView)
+
+「ファイル一覧をツリー表示に、フォルダの開閉もできるように」という要望を受けて、
+`FileList`(フラットな一覧、表示専用)を`TreeView`(`app/funicular/ruby/components/
+tree_view.rb`)に置き換えた。
+
+### 汎用コンポーネントとして設計した
+
+「あとで独立したコンポーネント/gemとして切り出すことを念頭に」という指定だったので、
+`TreeView`は「ファイル」や「プロジェクト」を一切知らない、
+`{name:, path:, type: :dir|:file, children: [...]}`という形のノード配列を
+描画するだけの汎用コンポーネントにしてある。props(`nodes` `collapsed` `selected`
+`icon_for` `on_select` `on_toggle`)経由でしか外の世界とやり取りしない。
+
+前節の「子コンポーネントは親の再描画のたびに作り直される」という制約があるので、
+**折りたたみ状態(どのディレクトリが閉じているか)は`TreeView`自身のstateには
+一切持たせず、呼び出し側(`EditorApp`の`state[:collapsed_dirs]`)に持たせて
+propsで渡す**設計にしてある。`TreeView`は`initialize_state`を定義していない
+(=表示専用コンポーネントの規約を守っている)ので、作り直されても実害が無い。
+
+`state[:files]`(プロジェクト直下からの相対パスのフラットな配列。例:
+`"mrbgems/picoruby_hello_world/mrbgem.rake"`)をネストしたノード配列に組み立てる
+ロジック(`file_tree_nodes` / `insert_file_tree_path` / `sorted_file_tree_nodes`)は
+「ファイルパス」というこのアプリ固有の概念を扱うので、`TreeView`側ではなく
+`EditorApp`側に置いてある。
+
+### 踏んだ罠: `TreeView#select`がFunicularの`<select>`タグヘルパーと衝突する
+
+ファイルクリック時のハンドラを最初`select(path)`という名前にしたところ、
+ブラウザで即座に
+
+```
+Funicular::DSLCollisionError: TreeView#select collides with the Funicular DSL
+(<select> tag helper). Rename it (e.g. `select_value`), or declare
+`allow_dsl_override :select` and use `tag(:select, ...)` to emit the element.
+```
+
+というエラーが出て、ツリーが「読み込み中…」のまま固まった(例外がrender中に
+発生すると、そのレンダーパス全体が失敗し、直前の(読み込み中の)DOMが
+そのまま残ってしまう)。Funicularは`div` `span` `button` `ul` `li`等と同じ感覚で
+`select`という**HTMLタグ用のDSLメソッドを標準で生やしている**ため、
+コンポーネント側で同名のメソッド(`select`)を定義すると衝突する。エラーメッセージ
+自体は非常に分かりやすく、原因の特定に迷うことは無かった。対処は単純に
+`select_file`のような衝突しない名前に変える。
+
+**教訓**: Funicularのコンポーネントにメソッドを生やすときは、HTMLタグ名
+(`select` `label` `option` `form` `data` 等、意外と一般的な単語がタグ名として
+存在する)と衝突しないか一応意識する。衝突した場合はエラーメッセージが
+`Funicular::DSLCollisionError`として明示的に教えてくれるので、実際に動かして
+みればすぐ分かる(今回もブラウザで動かして1回で発見できた)。
