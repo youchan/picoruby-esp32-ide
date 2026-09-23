@@ -19,6 +19,10 @@
 #               nilを返すか未指定ならアイコンを描画しない)
 #   on_select:  ファイルノードがクリックされたときに path を渡して呼ばれるlambda
 #   on_toggle:  ディレクトリノードがクリックされたときに path を渡して呼ばれるlambda
+#   on_context_menu: ノード(ファイル/ディレクトリどちらも)が右クリックされたときに
+#                     (node, event) を渡して呼ばれるlambda(省略可)。どんなメニュー
+#                     項目を出すかはこのコンポーネントは一切知らず、呼び出し側が
+#                     nodeの中身(type/path)を見て判断する
 #
 # 折りたたみ状態そのものはこのコンポーネントの中には持たせていない。
 # Funicularは呼び出し側(親)が再描画されるたびにこの子コンポーネントを
@@ -52,7 +56,7 @@ class TreeView < Funicular::Component
     collapsed = collapsed?(path)
 
     li(key: path, class: 'tree-node tree-node-dir') do
-      div(class: 'tree-row', onclick: -> { toggle(path) }) do
+      div(class: 'tree-row', onclick: -> { toggle(path) }, oncontextmenu: ->(event) { context_menu(node, event) }) do
         span(class: 'tree-caret') { collapsed ? '▸' : '▾' }
         render_icon(node)
         span(class: 'tree-label') { node[:name] }
@@ -67,7 +71,7 @@ class TreeView < Funicular::Component
     classes = path == props[:selected] ? 'tree-node tree-node-file active' : 'tree-node tree-node-file'
 
     li(key: path, class: classes) do
-      div(class: 'tree-row', onclick: -> { select_file(path) }) do
+      div(class: 'tree-row', onclick: -> { select_file(path) }, oncontextmenu: ->(event) { context_menu(node, event) }) do
         span(class: 'tree-caret-spacer')
         render_icon(node)
         span(class: 'tree-label') { node[:name] }
@@ -97,5 +101,12 @@ class TreeView < Funicular::Component
   def select_file(path)
     on_select = props[:on_select]
     on_select.call(path) if on_select
+  end
+
+  # ブラウザ標準の右クリックメニューは常に抑止し、呼び出し側にnode/eventを渡すだけ。
+  def context_menu(node, event)
+    event.preventDefault
+    on_context_menu = props[:on_context_menu]
+    on_context_menu.call(node, event) if on_context_menu
   end
 end

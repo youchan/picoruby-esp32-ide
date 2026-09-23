@@ -49,6 +49,23 @@
       var source = /\n$/.test(code) ? code + ' ' : code;
       return Prism.highlight(source, grammar, lang);
     };
+
+    // サイドバー(ファイルツリー)の自前コンテキストメニューとブラウザ標準の
+    // 右クリックメニューが同時に出てしまう問題への対処。
+    // tree_view.rb / editor_app.rb 側でもFunicularのDSL(oncontextmenu:)経由で
+    // event.preventDefaultを呼んでいるが、Funicularの合成イベントはPicoRuby.wasmを
+    // 経由する分、ブラウザが「このcontextmenuイベントのデフォルト動作をまだ
+    // キャンセルできる」タイミングに間に合わないことがある(実機でのユーザー確認で
+    // 発覚)。preventDefaultはネイティブのJSイベントハンドラ内で同期的に呼ぶ必要が
+    // あるため、ここだけはPicoRuby/Funicularのブリッジを経由しない素のJSで
+    // 直接止める(funicularHighlightと同じ「確実性が要る部分はプレーンJSに
+    // 任せる」方針)。サイドバーの外(エディタのtextarea等)は標準メニューを
+    // 残したいので、.sidebar配下かどうかをclosestで判定してそこだけ抑止する。
+    document.addEventListener('contextmenu', function (event) {
+      if (event.target.closest('.sidebar')) {
+        event.preventDefault();
+      }
+    });
   </script>
 </head>
 <body>
@@ -61,6 +78,8 @@
   <script type="text/ruby" src="/ruby/components/tree_view.rb"></script>
   <script type="text/ruby" src="/ruby/components/toolbar.rb"></script>
   <script type="text/ruby" src="/ruby/components/project_settings_dialog.rb"></script>
+  <script type="text/ruby" src="/ruby/components/prompt_dialog.rb"></script>
+  <script type="text/ruby" src="/ruby/components/open_project_dialog.rb"></script>
   <script type="text/ruby" src="/ruby/components/log_panel.rb"></script>
   <script type="text/ruby" src="/ruby/components/menu_bar.rb"></script>
   <script type="text/ruby" src="/ruby/components/editor_app.rb"></script>

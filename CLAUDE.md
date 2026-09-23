@@ -791,3 +791,183 @@ Funicular::DSLCollisionError: TreeView#select collides with the Funicular DSL
 存在する)と衝突しないか一応意識する。衝突した場合はエラーメッセージが
 `Funicular::DSLCollisionError`として明示的に教えてくれるので、実際に動かして
 みればすぐ分かる(今回もブラウザで動かして1回で発見できた)。
+
+## 「ファイル」メニュー(新規プロジェクト/プロジェクトを開く/mrbgemを追加/新規ファイル/新しいフォルダ)
+
+既知の制約に挙げていた「新規ファイル作成/削除/リネームAPIがない」「プロジェクトの
+新規作成ができない」を一部解消する形で、メニューバー左端に「ファイル」ドロップダウンを
+追加した(`menu_bar.rb`の`render_file_menu`)。削除/リネームは対象外のまま(スコープ外)。
+
+- `POST /api/projects` — 新規プロジェクト作成。`app/app.rb`(空)と`build_config.rb`
+  (空)だけを作る。`mrbgems/`は最初のmrbgem追加まで作らない
+  (`project_mrbgem_names`がディレクトリ不在でも空配列を返すため不要)
+- `POST /api/projects/:name/mrbgems` — mrbgemの雛形(`mrbgem.rake` +
+  `mrblib/<name>.rb`)を作る。ここに置くだけで次回ビルドから自動的に組み込まれる
+  仕組み(`generated_build_config_content`)は変更していない
+- `POST /api/projects/:name/files` — 空の新規ファイルを作る。既存の`POST /api/file`は
+  上書き専用のままにして、新規作成はこちらに分離した
+- `POST /api/projects/:name/folders` — 空のフォルダを作る
+- プロジェクト名・mrbgem名は`PROJECT_NAME_PATTERN`(英数字・`_`・`-`のみ)で
+  バリデーションしている。新規ファイル/フォルダのパスは`safe_path`のパストラバーサル
+  対策に加え、`valid_new_file_path?`でドット始まりのセグメント(`.r2p2-esp32`や
+  `.config.yml`等、UI上のファイル一覧に出さない前提のものと衝突しうる)を拒否する
+
+**新規ファイル・新しいフォルダは`app/`配下だけに制限してある**(「ファイルの作成は
+app以下に制限したい」というフィードバック)。`under_app_dir?`ヘルパーで
+`app/`で始まり、かつ`app/`自身ではないことをチェックする。`mrbgems/`側は
+「mrbgemを追加」が専用の雛形(`mrbgem.rake` + `mrblib/<name>.rb`)を作るので、
+この2つのエンドポイントの対象外のままでよい。新規ファイルの拡張子も
+`NEW_FILE_EXTENSION`(`.rb`)固定にした(同フィードバックの「rubyファイルだけに
+制限」より。`app/`はR2P2起動時に`main_task.rb`がloadするRubyスクリプト置き場で
+あり、mrbgemのような`.c`/`.h`/`.rake`を置く場所ではないため)。UI側のダイアログには
+`app/`を省いた相対パス(例: `utils/foo.rb`)を入力させ、送信直前に
+`EditorApp#to_app_path`で`app/`を補っている(サーバ側のチェックは飽くまで防御。
+「`app/`を書かなくていい」というUXはフロント側の責務)。
+
+**空のフォルダをツリーに表示するために`GET /api/dirs`を追加した。**
+既存の`GET /api/files`はファイルパスの一覧しか返さないため、`file_tree_nodes`が
+そこから組み立てるツリーは「1つもファイルを含まないディレクトリ」を表現できない
+(パスの並びにディレクトリ単体のエントリが出てこないので)。新規フォルダ作成で
+このケースが実際に起きるため、ディレクトリ一覧(空のものも含む、`Dir.glob`ベースで
+`GET /api/files`と同じくドット始まりは自動的に除外)を別エンドポイントで返し、
+フロント側は`state[:dirs]`として保持、`insert_file_tree_dir_path`
+(`insert_file_tree_path`のディレクトリ専用版。末尾セグメントも`:dir`として
+挿入する点だけが違う)で`state[:files]`由来のツリーにマージしている。
+`GET /api/files`のレスポンス形自体(ファイルパスの配列)は変えていない
+(ターミナルの「app/ をアップロード」機能がこの配列をそのままファイルとして
+読み込みに行くため、ディレクトリを混ぜると壊れる)。
+
+UI側は3つのフォームダイアログ(新規プロジェクト名/mrbgem名/ファイルパス)を
+`PromptDialog`という1つの汎用コンポーネントに集約した(タイトル/ラベル/
+プレースホルダ/確定ボタンのラベル/エラーメッセージをpropsで差し替えるだけ)。
+「プロジェクトを開く」だけは一覧から選ぶ形なので別コンポーネント`OpenProjectDialog`
+にしている(EditorAppが既に持っている`state[:projects]`をそのまま渡すだけで、
+追加のAPI呼び出しはしない)。
+
+**入力欄はrefで直接DOM値を読む非制御コンポーネントにしてある**(`PromptDialog`)。
+ビルドログのポーリング(3秒おき)でEditorAppが再描画される間もダイアログを開いたままに
+できる設計上、`value`をpropsから毎回書き戻す制御方式にすると、そのたびに入力中の文字が
+消えてしまう。他のフォーム系コンポーネント(`project_settings_dialog.rb`の
+`<select>`)と同じ理由・同じ対処。
+
+実装時に上の「`TreeView#select`衝突」と全く同じ罠を`OpenProjectDialog#select`でも
+踏んだ(プロジェクトをクリックして選択するメソッドに`select`と名付けてしまった)。
+ブラウザのコンソールに`Funicular::DSLCollisionError`が出て発覚、`select_project`に
+リネームして解決。**この罠は繰り返し踏みやすいので、Funicularコンポーネントに
+クリックハンドラ用メソッドを生やすときは`select`という名前を反射的に避けること。**
+
+## ファイルツリーの右クリックコンテキストメニュー・削除機能
+
+「ファイルツリーにもコンテキストメニューが欲しい」というフィードバックを受けて、
+`TreeView`(`tree_view.rb`)の各行に`oncontextmenu`を追加した。`TreeView`自体は
+ファイル/プロジェクトの概念を知らない汎用コンポーネントという設計を保つため、
+右クリックされた`node`(type/path)とDOMの`event`をそのまま`props[:on_context_menu]`
+経由で呼び出し側(`EditorApp`)に渡すだけにしてある。メニューの中身を何にするかの
+判断は全部`EditorApp#context_menu_kind`に置いた:
+
+- ファイル: 削除のみ
+- `"app"`自身: ファイルを作成/フォルダを作成(削除は出さない。プロジェクトの
+  実行スクリプト置き場であるapp/自体が消えると壊れるため)
+- `"app"`配下のディレクトリ: ファイルを作成/フォルダを作成/削除
+- `"mrbgems"`自身: mrbgemを追加のみ(既存の「ファイル」メニューの項目と同じ
+  `open_add_mrbgem_dialog`を呼ぶだけ。専用の雛形を作る仕組みなので他の
+  ディレクトリとは別メニューにしてある、という要望通り)
+- それ以外のディレクトリ(`mrbgems/<gem>`やそのサブディレクトリ等): 削除のみ
+  (ファイル/フォルダの新規作成はapp/配下限定という既存の制約と矛盾しないよう、
+  ここでは作成系のメニュー項目を出さない)
+
+**新規ファイル/フォルダ作成ダイアログをcontext_dirで一般化した。** 以前は
+「app/ からの相対パス」を常に入力させる作りだったが、コンテキストメニューから
+開く場合は右クリックしたディレクトリの中に作るのが自然なので、
+`PromptDialog`の`state[:prompt_dialog][:context_dir]`(基準ディレクトリの
+プロジェクト内相対パス。「ファイル」メニューからなら常に`'app'`、コンテキスト
+メニューからなら右クリックしたディレクトリの`path`)を基準に、入力欄には
+「基準ディレクトリの中でのファイル名」だけを入力させ、送信直前に
+`EditorApp#to_full_path(context_dir, rel)`で連結する。基準ディレクトリを
+ダイアログの入力欄の初期値として埋め込む(prefill)方式は採用していない
+——`PromptDialog`は非制御コンポーネントなので、ポーリング等による親の
+再描画のたびに初期値を書き戻すと入力中の文字が消える(既存の「入力欄は
+refで直接DOM値を読む」節と同じ理由)。代わりにラベル・タイトル側に
+基準ディレクトリを文言として表示するだけにして、入力欄自体は常に空から
+始まる設計にしてある。
+
+**削除(`DELETE /api/projects/:name/files` / `DELETE /api/projects/:name/folders`)は
+作成と違いapp/配下に限定していない**(mrbgemの.c/.hファイルなど、プロジェクト内の
+どこにあるファイル/フォルダでも削除自体は妥当なユースケースがあるため)。
+その代わり、フォルダ削除は`app`自身・`mrbgems`自身を消せないようサーバ側でも
+明示的にガードしている(UIのコンテキストメニューで出さないのに加えて、
+APIを直接叩かれた場合の防御を二重にしてある)。削除は取り消せない操作なので、
+実行前に`JS.global.confirm(message)`で確認を挟む(Funicular本体の
+`Funicular.confirm`も既定でこれに委譲する作りになっている。
+`picoruby-funicular/mrblib/funicular.rb`の`!!JS.global.confirm(message)`参照)。
+削除対象のファイルがエディタで開いたままだった場合(削除されたフォルダの
+配下に開いていたファイルがあった場合も含む)は、実体の無いファイルを
+編集し続けないよう`current_path`をクリアする。
+
+**踏んだ罠1**: `context_menu_kind`で`APP_DIRNAME`/`MRBGEMS_DIRNAME`を参照したところ
+`NameError: uninitialized constant EditorApp::MRBGEMS_DIRNAME`になった。
+これらの定数は`app.rb`(Sinatra、サーバ側のRubyプロセス)にしか定義しておらず、
+`editor_app.rb`(ブラウザのPicoRuby.wasm、別プロセス・別Rubyランタイム)から
+見えるわけではない、という当たり前の見落とし。フロント側にも同名の定数を
+別途定義して解決した(サーバとフロントで定数を共有する仕組みは無いので、
+今後も両側に同じ文字列リテラルを持つ設計になる)。
+
+**踏んだ罠2**: 削除確認の`JS.global.confirm(...)`は、このセッションで使っている
+ブラウザ自動操作ツール(MCP経由)ではネイティブダイアログが自動的に抑制され、
+常に`false`が返ってくる(「ボタンを押しても削除されない」ように見えた)。
+実際にはconfirmメッセージの内容自体は正しく渡っており、`curl`で
+`DELETE`エンドポイントを直叩きして削除自体が動くことを別途確認した。
+実際のブラウザ(自動操作ツール経由でない、人間が操作するブラウザ)では
+ネイティブダイアログが普通に表示される。この種の自動操作ツール特有の
+制約は、機能自体のバグと混同しないよう注意すること。
+
+**踏んだ罠3**: 上記まではこの自動操作ツールで検証していたが、実際にユーザーが
+自分のブラウザで試したところ「ブラウザ標準の右クリックメニューも自前のメニューと
+一緒に出てしまう」と報告があった。`tree_view.rb`の各行の`oncontextmenu`(Funicular
+DSL経由)でも`event.preventDefault`は呼んでいたが、それだけでは足りなかった
+(自動操作ツールでは right_click してもブラウザの標準メニュー自体が画面に
+描画されないため、この不具合はこのツールだけでは検出できず、実際に人間が
+ブラウザで試して初めて発覚した)。
+
+最初の対処として、`EditorApp#component_mounted`から素のJS
+`JS.global[:document].addEventListener('contextmenu') { |event| ... }`
+にRubyのブロックを直接渡す形(xterm.jsの`attachCustomKeyEventHandler`と同じ
+発想)を試したが、**これでも直らなかった**。`refs[:sidebar]`越しの
+`Node#contains`判定や、そもそもRubyブロック自体がPicoRuby.wasmを経由する
+呼び出しである以上、`addEventListener`の登録先がJS/Rubyのどちらであっても、
+コールバック本体がRuby(wasm)側にある限り、ブラウザ側から見て
+「このcontextmenuイベントのデフォルト動作をまだキャンセルできる」同期的な
+タイミングに間に合わない可能性がある、ということが実機での再現から
+分かった(正確な内部メカニズムは未特定だが、Rubyブロックを経由する時点で
+何らかの非同期性が生じると考えるのが一番説明がつく)。
+
+最終的に効いたのは、**PicoRuby/Funicularのブリッジを完全に経由しない、
+`views/index.erb`内の素の`<script>`タグ**(`window.funicularHighlight`と同じ、
+「確実性が要る部分はプレーンJSに任せる」既存の方針):
+
+```js
+document.addEventListener('contextmenu', function (event) {
+  if (event.target.closest('.sidebar')) {
+    event.preventDefault();
+  }
+});
+```
+
+これなら`preventDefault`の呼び出しがブラウザのイベントディスパッチと完全に
+同一のJS実行コンテキスト・同一のコールスタックで完結するため、タイミングの
+不確実性が原理的に無くなる。`EditorApp#suppress_sidebar_native_context_menu`
+(Rubyブロック版)と`div(class: 'sidebar', ref: :sidebar)`は不要になったので
+削除した。実際に`document.querySelector('.tree-row')`へ合成contextmenuイベントを
+`dispatchEvent`し、`event.defaultPrevented === true`になることと、
+`.sidebar`外(エディタの`<textarea>`)では`false`のままになることを
+ブラウザのJS実行で直接検証して確認済み。
+
+**教訓**: `preventDefault`が間に合うかどうかが問題になったら、Funicularの
+`onXxx:`経由はもちろん、「素のJS APIにRubyのブロックを直接渡す」形
+(xterm.jsの`attachCustomKeyEventHandler`のような、コールバックの型自体は
+JSネイティブでもRubyブロックである時点でPicoRuby.wasmを経由する)でも
+確実とは限らない。**本当に確実にしたいなら、Rubyを一切経由しない
+`<script>`タグの中で完結させること。** また、この種のタイミング不具合は
+自動操作ツールのスクリーンショットだけでは気づけない(ネイティブUIの重なりが
+写らない)ので、疑わしいときは実際に人間のフィードバックを当てにし、
+`dispatchEvent`+`defaultPrevented`のような形でJS実行から直接検証する。

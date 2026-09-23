@@ -7,9 +7,15 @@
 # フィードバックを受けてプロジェクトごとの`.config.yml`に持たせる方式に変更した。
 # そのため、ここには設定値を編集する「設定」ボタンと、その設定値をそのまま使って
 # 実行するだけの「セットアップ」「ビルド開始」ボタンだけが残っている。
+# 左端には「ファイル」メニュー(新しいプロジェクト/プロジェクトを開く/mrbgemを
+# 追加/新規ファイル/新しいフォルダ)を置いてある。開閉状態はここでは持たず(理由は
+# editor_app.rbの「子コンポーネントは親の再描画のたびに作り直される」の節参照)、
+# props[:file_menu_open]として親(EditorApp)のstateをそのまま反映するだけにしてある。
 # 他のパネルと同じく表示専用で、実処理(状態管理・API呼び出し)は
 # props[:on_project_select] / props[:on_settings] / props[:on_setup] /
-# props[:on_build] 経由で親(EditorApp)に委譲する。
+# props[:on_build] / props[:on_file_menu_toggle] / props[:on_new_project] /
+# props[:on_open_project] / props[:on_add_mrbgem] / props[:on_new_file] /
+# props[:on_new_folder] 経由で親(EditorApp)に委譲する。
 class MenuBar < Funicular::Component
   STATUS_LABELS = {
     'idle' => 'ビルド未実行',
@@ -20,6 +26,7 @@ class MenuBar < Funicular::Component
 
   def render
     div(class: 'menu-bar') do
+      render_file_menu
       span(class: 'menu-bar-title') { 'PicoRuby ESP32 IDE' }
       render_project_select
       div(class: 'menu-bar-spacer')
@@ -29,6 +36,42 @@ class MenuBar < Funicular::Component
       render_status_pill
       render_install_button
     end
+  end
+
+  def handle_file_menu_toggle(event)
+    event.preventDefault
+    on_file_menu_toggle = props[:on_file_menu_toggle]
+    on_file_menu_toggle.call if on_file_menu_toggle
+  end
+
+  def handle_new_project(event)
+    event.preventDefault
+    on_new_project = props[:on_new_project]
+    on_new_project.call if on_new_project
+  end
+
+  def handle_open_project(event)
+    event.preventDefault
+    on_open_project = props[:on_open_project]
+    on_open_project.call if on_open_project
+  end
+
+  def handle_add_mrbgem(event)
+    event.preventDefault
+    on_add_mrbgem = props[:on_add_mrbgem]
+    on_add_mrbgem.call if on_add_mrbgem
+  end
+
+  def handle_new_file(event)
+    event.preventDefault
+    on_new_file = props[:on_new_file]
+    on_new_file.call if on_new_file
+  end
+
+  def handle_new_folder(event)
+    event.preventDefault
+    on_new_folder = props[:on_new_folder]
+    on_new_folder.call if on_new_folder
   end
 
   # <select> の変更イベント。プレースホルダ("プロジェクト未選択")が選ばれた場合は無視する。
@@ -62,6 +105,50 @@ class MenuBar < Funicular::Component
   end
 
   private
+
+  def render_file_menu
+    div(class: 'file-menu') do
+      button(class: 'file-menu-toggle', onclick: :handle_file_menu_toggle) { 'ファイル' }
+      render_file_menu_dropdown if props[:file_menu_open]
+    end
+  end
+
+  def render_file_menu_dropdown
+    div(class: 'file-menu-dropdown') do
+      button(class: 'file-menu-item', onclick: :handle_new_project) { '新しいプロジェクト…' }
+      button(class: 'file-menu-item', onclick: :handle_open_project) { 'プロジェクトを開く…' }
+      render_add_mrbgem_menu_item
+      render_new_file_menu_item
+      render_new_folder_menu_item
+    end
+  end
+
+  # mrbgem追加・新規ファイル作成はプロジェクトを選択していないと行き先が無いので、
+  # 未選択時は押せないようにする(disabled: false を渡す書き方はこのDSLでは
+  # 効かないため、分岐で二通りの要素を書き分ける。toolbar.rbのrender_save_button参照)。
+  def render_add_mrbgem_menu_item
+    if props[:current_project].to_s.empty?
+      button(class: 'file-menu-item', disabled: true) { 'mrbgemを追加…' }
+    else
+      button(class: 'file-menu-item', onclick: :handle_add_mrbgem) { 'mrbgemを追加…' }
+    end
+  end
+
+  def render_new_file_menu_item
+    if props[:current_project].to_s.empty?
+      button(class: 'file-menu-item', disabled: true) { '新規ファイル…' }
+    else
+      button(class: 'file-menu-item', onclick: :handle_new_file) { '新規ファイル…' }
+    end
+  end
+
+  def render_new_folder_menu_item
+    if props[:current_project].to_s.empty?
+      button(class: 'file-menu-item', disabled: true) { '新しいフォルダ…' }
+    else
+      button(class: 'file-menu-item', onclick: :handle_new_folder) { '新しいフォルダ…' }
+    end
+  end
 
   def render_project_select
     projects = props[:projects] || []

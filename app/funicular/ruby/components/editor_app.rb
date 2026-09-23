@@ -29,6 +29,12 @@ require 'crc'
 # このEditorAppの中に置く必要がある。textarea/ハイライト層を子コンポーネントに
 # 切り出さず、非制御textarea+refで直接扱っているのと同じ理由・同じ対処。
 class EditorApp < Funicular::Component
+  # プロジェクト内の特別なディレクトリ名。app.rb側のAPP_DIRNAME/MRBGEMS_DIRNAMEと
+  # 対応(サーバとフロントで別プロセス=別Rubyランタイムなので定数は共有できず、
+  # 両側に定義してある)。
+  APP_DIRNAME = 'app'
+  MRBGEMS_DIRNAME = 'mrbgems'
+
   # 拡張子 → Prism の言語名
   LANGUAGES = { 'rb' => 'ruby', 'c' => 'c', 'h' => 'c' }
 
@@ -52,6 +58,7 @@ class EditorApp < Funicular::Component
       loading_projects: true,
       current_project: nil,
       files: [],
+      dirs: [], # プロジェクト内の(空フォルダも含む)ディレクトリ一覧。file_tree_nodes参照
       loading_files: false,
       collapsed_dirs: [],
       current_path: nil,
@@ -65,6 +72,10 @@ class EditorApp < Funicular::Component
       building: false,
       settings_dialog_open: false,
       project_config: default_project_config,
+      file_menu_open: false,
+      prompt_dialog: nil, # { kind:, title:, label:, placeholder:, confirm_label:, error:, context_dir: } または nil
+      open_project_dialog_open: false,
+      context_menu: nil, # { kind:, path:, x:, y: } または nil。open_tree_context_menu参照
       settings_platform: nil,
       settings_vm: '',
       settings_usb_console: false,
@@ -115,11 +126,39 @@ class EditorApp < Funicular::Component
         build_status: state[:build_status],
         building: state[:building],
         platform_building: state[:platform_building],
+        file_menu_open: state[:file_menu_open],
         on_project_select: ->(name) { select_project(name) },
         on_settings: -> { open_settings_dialog },
         on_setup: -> { start_platform_setup },
-        on_build: -> { start_build }
+        on_build: -> { start_build },
+        on_file_menu_toggle: -> { toggle_file_menu },
+        on_new_project: -> { open_new_project_dialog },
+        on_open_project: -> { open_open_project_dialog },
+        on_add_mrbgem: -> { open_add_mrbgem_dialog },
+        on_new_file: -> { open_new_file_dialog },
+        on_new_folder: -> { open_new_folder_dialog }
       )
+
+      if state[:prompt_dialog]
+        component(PromptDialog,
+          title: state[:prompt_dialog][:title],
+          label: state[:prompt_dialog][:label],
+          placeholder: state[:prompt_dialog][:placeholder],
+          confirm_label: state[:prompt_dialog][:confirm_label],
+          error: state[:prompt_dialog][:error],
+          on_confirm: ->(value) { handle_prompt_confirm(value) },
+          on_cancel: -> { patch(prompt_dialog: nil) }
+        )
+      end
+
+      if state[:open_project_dialog_open]
+        component(OpenProjectDialog,
+          projects: state[:projects],
+          current_project: state[:current_project],
+          on_select: ->(name) { patch(open_project_dialog_open: false); select_project(name) },
+          on_cancel: -> { patch(open_project_dialog_open: false) }
+        )
+      end
 
       if state[:settings_dialog_open]
         component(ProjectSettingsDialog,
@@ -134,6 +173,8 @@ class EditorApp < Funicular::Component
           on_cancel: -> { patch(settings_dialog_open: false) }
         )
       end
+
+      render_tree_context_menu if state[:context_menu]
 
       div(class: 'app-body') do
         div(class: 'sidebar') do
@@ -279,7 +320,7 @@ class EditorApp < Funicular::Component
   def render_file_tree
     if state[:loading_files]
       div(class: 'sidebar-message') { '読み込み中…' }
-    elsif state[:files].empty?
+    elsif state[:files].empty? && state[:dirs].empty?
       div(class: 'sidebar-message') { '編集できるファイルがありません' }
     else
       component(TreeView,
@@ -288,7 +329,8 @@ class EditorApp < Funicular::Component
         selected: state[:current_path],
         icon_for: ->(node) { file_tree_icon(node) },
         on_select: ->(path) { open_file(path) },
-        on_toggle: ->(path) { toggle_tree_dir(path) }
+        on_toggle: ->(path) { toggle_tree_dir(path) },
+        on_context_menu: ->(node, event) { open_tree_context_menu(node, event) }
       )
     end
   end
@@ -314,9 +356,14 @@ class EditorApp < Funicular::Component
   # state[:files] (例: ["app/app.rb", "mrbgems/picoruby_hello_world/mrbgem.rake"]) を
   # "/" 区切りで分解し、ディレクトリはまとめてネストしたノード配列に組み立てる。
   # 各階層でディレクトリを先に、それぞれ名前順に並べる。
+  #
+  # state[:dirs](GET /api/dirsで取得した、中身が空のものも含む全ディレクトリ)も
+  # 合わせて挿入する。state[:files]だけからではファイルを1つも含まない空の
+  # フォルダを表現できない(パスの並びにディレクトリ単体のエントリが出てこないため)。
   def file_tree_nodes
     root = {}
     state[:files].each { |path| insert_file_tree_path(root, path.split('/'), '') }
+    state[:dirs].each { |path| insert_file_tree_dir_path(root, path.split('/'), '') }
     sorted_file_tree_nodes(root)
   end
 
@@ -334,6 +381,20 @@ class EditorApp < Funicular::Component
       entry[:node] ||= { name: name, path: path, type: :dir }
       insert_file_tree_path(entry[:children], segments[1, segments.length - 1], path)
     end
+  end
+
+  # insert_file_tree_pathのディレクトリ専用版。末尾のセグメントも:dirとして
+  # 挿入する(ファイルの経路の途中に出てくる中間ディレクトリと違い、ここでは
+  # そのパスそのものがディレクトリであることが分かっている)。既にファイル経由で
+  # 同じパスにノードが作られていれば(`entry[:node] ||=`により)上書きしない。
+  def insert_file_tree_dir_path(root, segments, prefix)
+    name = segments[0]
+    path = prefix.empty? ? name : "#{prefix}/#{name}"
+    entry = (root[name] ||= { children: {} })
+    entry[:node] ||= { name: name, path: path, type: :dir }
+
+    return if segments.length == 1
+    insert_file_tree_dir_path(entry[:children], segments[1, segments.length - 1], path)
   end
 
   def sorted_file_tree_nodes(root)
@@ -777,6 +838,312 @@ class EditorApp < Funicular::Component
     end
   end
 
+  # --- ファイルメニュー(新規プロジェクト/プロジェクトを開く/mrbgemを追加/新規ファイル/新しいフォルダ) --
+
+  def toggle_file_menu
+    patch(file_menu_open: !state[:file_menu_open])
+  end
+
+  def open_new_project_dialog
+    patch(file_menu_open: false, context_menu: nil, prompt_dialog: {
+      kind: :new_project,
+      title: '新しいプロジェクト',
+      label: 'プロジェクト名(英数字・_・-のみ)',
+      placeholder: 'my_project',
+      confirm_label: '作成',
+      error: nil
+    })
+  end
+
+  def open_open_project_dialog
+    patch(file_menu_open: false, context_menu: nil, open_project_dialog_open: true)
+  end
+
+  def open_add_mrbgem_dialog
+    return if state[:current_project].nil?
+
+    patch(file_menu_open: false, context_menu: nil, prompt_dialog: {
+      kind: :add_mrbgem,
+      title: 'mrbgemを追加',
+      label: 'mrbgem名(英数字・_・-のみ)',
+      placeholder: 'picoruby_my_gem',
+      confirm_label: '追加',
+      error: nil
+    })
+  end
+
+  # 新規ファイル・新しいフォルダは、実機起動スクリプトの置き場であるapp/配下だけを
+  # 対象にしている(app.rb側のunder_app_dir?と対応)。「ファイル」メニューからは
+  # app/を省いた相対パス(ネストしたパスも可)を、ツリーのコンテキストメニューからは
+  # 右クリックしたディレクトリ内でのファイル名だけを入力させる。どちらもcontext_dir
+  # (前者は固定で'app'、後者は右クリックしたディレクトリのpath)を基準にした相対パス
+  # という点は同じなので、show_new_file_dialog/show_new_folder_dialogに集約している。
+  def open_new_file_dialog
+    return if state[:current_project].nil?
+    show_new_file_dialog('app')
+  end
+
+  def open_new_folder_dialog
+    return if state[:current_project].nil?
+    show_new_folder_dialog('app')
+  end
+
+  def show_new_file_dialog(context_dir)
+    patch(file_menu_open: false, context_menu: nil, prompt_dialog: {
+      kind: :new_file,
+      title: '新規ファイル',
+      label: context_dir_label(context_dir, '拡張子は.rb'),
+      placeholder: context_dir == 'app' ? 'utils/foo.rb' : 'foo.rb',
+      confirm_label: '作成',
+      error: nil,
+      context_dir: context_dir
+    })
+  end
+
+  def show_new_folder_dialog(context_dir)
+    patch(file_menu_open: false, context_menu: nil, prompt_dialog: {
+      kind: :new_folder,
+      title: '新しいフォルダ',
+      label: context_dir_label(context_dir, nil),
+      placeholder: 'utils',
+      confirm_label: '作成',
+      error: nil,
+      context_dir: context_dir
+    })
+  end
+
+  def context_dir_label(context_dir, note)
+    base = context_dir == 'app' ? 'app/ からの相対パス' : "#{context_dir}/ 内の名前"
+    note ? "#{base}。#{note}" : base
+  end
+
+  # PromptDialogの確定ボタン(または入力欄でのEnter)から呼ばれる。
+  # kindによって新規プロジェクト/mrbgem追加/新規ファイル作成/新規フォルダ作成の
+  # どれを行うか分岐する。
+  def handle_prompt_confirm(value)
+    dialog = state[:prompt_dialog]
+    return unless dialog
+
+    name = value.to_s.strip
+    if name.empty?
+      patch(prompt_dialog: dialog.merge(error: '入力してください'))
+      return
+    end
+
+    case dialog[:kind]
+    when :new_project then create_project(name)
+    when :add_mrbgem then add_mrbgem(name)
+    when :new_file then create_file(to_full_path(dialog[:context_dir], name))
+    when :new_folder then create_folder(to_full_path(dialog[:context_dir], name))
+    end
+  end
+
+  # ダイアログに入力された相対パスの先頭にcontext_dir(基準ディレクトリ)を補う。
+  # ユーザーが誤って基準ディレクトリ自体を書いてしまっても二重にはならないようにする。
+  #
+  # 正規表現(\Aアンカー)は使わない。PicoRuby.wasm上のRegexpはJSのRegExpへ
+  # そのまま委譲される作りで、JSは\Aをサポートしないため
+  # 「Invalid regular expression」でArgumentErrorになった(実際にブラウザで
+  # 踏んで発覚。この例外はコールバック内で発生するため画面上には何も表示されず、
+  # ブラウザのコンソールにだけ出る=「ボタンを押しても何も起きない」ように見える、
+  # setTimeoutの罠と同じ性質の落とし穴)。
+  def to_full_path(context_dir, rel)
+    cleaned = rel.to_s
+    cleaned = cleaned[1, cleaned.length - 1].to_s while cleaned.start_with?('/')
+    prefix = "#{context_dir}/"
+    cleaned.start_with?(prefix) ? cleaned : "#{prefix}#{cleaned}"
+  end
+
+  def prompt_dialog_error(message)
+    dialog = state[:prompt_dialog]
+    return unless dialog
+    patch(prompt_dialog: dialog.merge(error: (message && !message.empty?) ? message : '失敗しました'))
+  end
+
+  def create_project(name)
+    Funicular::HTTP.post('/api/projects', { name: name }) do |response|
+      if response.ok
+        patch(prompt_dialog: nil)
+        load_project_list
+        select_project(name)
+      else
+        prompt_dialog_error(response.error_message)
+      end
+    end
+  end
+
+  def add_mrbgem(name)
+    project = state[:current_project]
+    Funicular::HTTP.post("/api/projects/#{encode(project)}/mrbgems", { name: name }) do |response|
+      if response.ok
+        patch(prompt_dialog: nil, status: 'mrbgemを追加しました', status_kind: 'ok')
+        load_file_list(project)
+      else
+        prompt_dialog_error(response.error_message)
+      end
+    end
+  end
+
+  def create_file(path)
+    project = state[:current_project]
+    Funicular::HTTP.post("/api/projects/#{encode(project)}/files", { path: path }) do |response|
+      if response.ok
+        patch(prompt_dialog: nil, status: 'ファイルを作成しました', status_kind: 'ok')
+        load_file_list(project)
+        load_dir_list(project) # ネストしたパスなら中間フォルダも新しくできているため
+        open_file(path)
+      else
+        prompt_dialog_error(response.error_message)
+      end
+    end
+  end
+
+  def create_folder(path)
+    project = state[:current_project]
+    Funicular::HTTP.post("/api/projects/#{encode(project)}/folders", { path: path }) do |response|
+      if response.ok
+        patch(prompt_dialog: nil, status: 'フォルダを作成しました', status_kind: 'ok')
+        load_dir_list(project)
+      else
+        prompt_dialog_error(response.error_message)
+      end
+    end
+  end
+
+  # --- ツリーのコンテキストメニュー ---------------------------------------
+  #
+  # TreeView自体はファイル/プロジェクトの概念を知らない汎用コンポーネントなので、
+  # 右クリックされたnode(type/path)を受け取ってメニューの中身を決めるのはこちら側の
+  # 責務にしてある。出す項目はnodeの種類によって変える:
+  #   - ファイル: 削除
+  #   - "app" 自身: ファイルを作成/フォルダを作成(削除は出さない。プロジェクトの
+  #     実行スクリプト置き場である app/ 自体を消せてしまうと壊れるため)
+  #   - "app" 配下のディレクトリ: ファイルを作成/フォルダを作成/削除
+  #   - "mrbgems" 自身: mrbgemを追加(専用の雛形を作る、他のディレクトリとは別メニュー)
+  #   - それ以外のディレクトリ(mrbgems/<gem>やそのサブディレクトリ等): 削除のみ
+  #     (ファイル/フォルダの新規作成はapp/配下限定のため、ここでは作成系を出さない)
+
+  def open_tree_context_menu(node, event)
+    kind = context_menu_kind(node)
+    return unless kind
+
+    patch(context_menu: {
+      kind: kind,
+      path: node[:path],
+      x: event[:clientX].to_i,
+      y: event[:clientY].to_i
+    })
+  end
+
+
+  def context_menu_kind(node)
+    return :file if node[:type] == :file
+    return :mrbgems_dir if node[:path] == MRBGEMS_DIRNAME
+    return :app_dir if node[:path] == APP_DIRNAME
+    return :app_subdir if node[:path].start_with?("#{APP_DIRNAME}/")
+
+    :other_dir
+  end
+
+  def close_tree_context_menu
+    patch(context_menu: nil)
+  end
+
+  def render_tree_context_menu
+    menu = state[:context_menu]
+    # 全画面の透明なオーバーレイでメニュー以外へのクリック/右クリックを拾い、
+    # 「メニューを出したまま別の操作をされて閉じ忘れる」ことがないようにする。
+    div(class: 'context-menu-overlay', onclick: -> { close_tree_context_menu },
+        oncontextmenu: ->(event) { event.preventDefault; close_tree_context_menu }) do
+      div(class: 'context-menu', style: "left: #{menu[:x]}px; top: #{menu[:y]}px;") do
+        render_context_menu_items(menu)
+      end
+    end
+  end
+
+  def render_context_menu_items(menu)
+    case menu[:kind]
+    when :file
+      context_menu_item('削除…') { confirm_delete_file(menu[:path]) }
+    when :app_dir
+      context_menu_item('ファイルを作成…') { show_new_file_dialog(menu[:path]) }
+      context_menu_item('フォルダを作成…') { show_new_folder_dialog(menu[:path]) }
+    when :app_subdir
+      context_menu_item('ファイルを作成…') { show_new_file_dialog(menu[:path]) }
+      context_menu_item('フォルダを作成…') { show_new_folder_dialog(menu[:path]) }
+      context_menu_item('削除…') { confirm_delete_folder(menu[:path]) }
+    when :mrbgems_dir
+      context_menu_item('mrbgemを追加…') { open_add_mrbgem_dialog }
+    when :other_dir
+      context_menu_item('削除…') { confirm_delete_folder(menu[:path]) }
+    end
+  end
+
+  # メニュー項目を選んだら、まずメニュー自体を閉じてから実際の処理(ダイアログを
+  # 開く/削除するなど)を実行する。
+  def context_menu_item(label, &action)
+    button(class: 'context-menu-item', onclick: -> { close_tree_context_menu; action.call }) { label }
+  end
+
+  # --- 削除 --------------------------------------------------------------
+
+  # window.confirmはブラウザ標準のブロッキングダイアログ。Funicular本体の
+  # Funicular.confirmも既定ではこれに委譲する作りになっている
+  # (picoruby-funicular/mrblib/funicular.rb 参照。`!!JS.global.confirm(message)`)。
+  # 削除は取り消せない操作なので、実行前に必ずここで確認する。
+  def confirm_delete_file(path)
+    return unless JS.global.confirm("#{path} を削除しますか?この操作は取り消せません。")
+    delete_file(path)
+  end
+
+  def confirm_delete_folder(path)
+    return unless JS.global.confirm("#{path} を中身ごと削除しますか?この操作は取り消せません。")
+    delete_folder(path)
+  end
+
+  def delete_file(path)
+    project = state[:current_project]
+    Funicular::HTTP.delete("/api/projects/#{encode(project)}/files?path=#{encode(path)}") do |response|
+      if response.ok
+        patch(status: 'ファイルを削除しました', status_kind: 'ok')
+        close_open_file if state[:current_path] == path
+        load_file_list(project)
+        load_dir_list(project)
+      else
+        message = response.error_message
+        patch(status: (message && !message.empty?) ? message : '削除に失敗しました', status_kind: 'error')
+      end
+    end
+  end
+
+  def delete_folder(path)
+    project = state[:current_project]
+    Funicular::HTTP.delete("/api/projects/#{encode(project)}/folders?path=#{encode(path)}") do |response|
+      if response.ok
+        patch(status: 'フォルダを削除しました', status_kind: 'ok')
+        close_open_file if current_path_under?(path)
+        load_file_list(project)
+        load_dir_list(project)
+      else
+        message = response.error_message
+        patch(status: (message && !message.empty?) ? message : '削除に失敗しました', status_kind: 'error')
+      end
+    end
+  end
+
+  # 削除されたファイル(またはその親フォルダごと削除された場合)が現在エディタで
+  # 開いたままになっていると、実体の無いファイルを編集し続けてしまうので閉じる。
+  def close_open_file
+    patch(current_path: nil, content: '', saved_content: '')
+    sync_textarea('')
+  end
+
+  def current_path_under?(dir_path)
+    current = state[:current_path]
+    return false unless current
+    current == dir_path || current.start_with?("#{dir_path}/")
+  end
+
   # --- サーバとのやりとり ----------------------------------------------
 
   def load_project_list
@@ -802,6 +1169,7 @@ class EditorApp < Funicular::Component
     patch(
       current_project: name,
       files: [],
+      dirs: [],
       loading_files: true,
       collapsed_dirs: [],
       current_path: nil,
@@ -815,6 +1183,7 @@ class EditorApp < Funicular::Component
     # プロジェクト切り替え時は非制御の textarea もクリアしておく
     sync_textarea('')
     load_file_list(name)
+    load_dir_list(name)
     load_project_config(name)
   end
 
@@ -846,6 +1215,14 @@ class EditorApp < Funicular::Component
           status_kind: 'error'
         )
       end
+    end
+  end
+
+  # 空フォルダもツリーに表示するための、ファイル一覧とは別のディレクトリ一覧取得。
+  # file_tree_nodes参照。
+  def load_dir_list(project)
+    Funicular::HTTP.get("/api/dirs?project=#{encode(project)}") do |response|
+      patch(dirs: response.data || []) if response.ok
     end
   end
 

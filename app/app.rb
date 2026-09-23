@@ -53,12 +53,23 @@ CONTAINER_R2P2_MOUNT = "/R2P2-ESP32"
 ALLOWED_EXTENSIONS = %w[.rb .c .h .rake].freeze
 PLATFORM_TARGETS = %w[esp32 esp32c3 esp32c6 esp32h2 esp32p4 esp32s3].freeze
 
+# 新規プロジェクト名・mrbgem名として許可する文字種。ディレクトリ名として
+# そのまま使うので、パストラバーサルや意図しない特殊文字を避けるため
+# 英数字・アンダースコア・ハイフンのみに絞ってある。
+PROJECT_NAME_PATTERN = /\A[A-Za-z0-9_-]+\z/.freeze
+
 # 1プロジェクト = projects/<name>/ の中に app/・mrbgems/・build_config.rb を
 # まとめて持つディレクトリ、という単位にしてある(app/mrbgemsをprojects直下に
 # 並べて種別を自動判定する方式から変更。1つのアプリと、それが使う自作mrbgem群を
 # 1プロジェクトとして丸ごと持ち歩けるように)。
 APP_DIRNAME = "app"
 MRBGEMS_DIRNAME = "mrbgems"
+
+# 「ファイル」メニューからの新規ファイル/新規フォルダ作成は、実機の起動スクリプト
+# である app/ 配下だけに限定する(mrbgems/ 以下は「mrbgemを追加」が専用の雛形を
+# 用意するので対象外)。拡張子もRubyの.rbのみに絞る(app/はR2P2起動時にmain_task.rb
+# がloadするRubyスクリプト置き場であり、.c/.h/.rakeを置く場所ではないため)。
+NEW_FILE_EXTENSION = ".rb"
 
 # プロジェクト固有のビルド設定。ユーザーが直接編集できる普通のファイルという位置づけ
 # (以前はGemsダイアログが生成する専用ファイルだったが、mrbgemがプロジェクトの中に
@@ -128,6 +139,32 @@ helpers do
   def json_error(status, message)
     halt status, { error: message }.to_json
   end
+
+  def valid_name?(name)
+    name.is_a?(String) && PROJECT_NAME_PATTERN.match?(name)
+  end
+
+  # 新規ファイル/フォルダの作成・削除で使う相対パスのチェック。safe_pathの
+  # パストラバーサル対策に加えて、ドット始まりのセグメント(R2P2_STATE_DIRNAME・
+  # PROJECT_CONFIG_FILENAME・GENERATED_BUILD_CONFIG_FILENAME等、UI上のファイル
+  # 一覧に出さない前提のものと衝突しうる)や空セグメントを拒否する。
+  def valid_relative_path?(rel)
+    return false if rel.nil? || rel.empty?
+
+    segments = rel.split("/")
+    segments.each do |seg|
+      return false if seg.empty? || seg == "." || seg == ".." || seg.start_with?(".")
+    end
+    true
+  end
+
+  # 新規ファイル/新規フォルダの作成先を app/ 配下に限定するチェック。
+  # "app" 自身(プロジェクト作成時に既に存在する)は対象外で、その下に
+  # 最低1階層のセグメントが必要。
+  def under_app_dir?(rel)
+    prefix = "#{APP_DIRNAME}/"
+    rel.start_with?(prefix) && rel.length > prefix.length
+  end
 end
 
 get "/" do
@@ -152,6 +189,33 @@ get "/api/projects" do
   available_projects.to_json
 end
 
+# 新しいプロジェクトを作成する。中身は最小構成(app/app.rb・build_config.rbの
+# 空ファイル)だけ用意し、mrbgemsディレクトリは最初のmrbgem追加時に作る
+# (project_mrbgem_names は mrbgems/ が無くても空配列を返すため、事前に
+# 用意しておく必要がない)。
+post "/api/projects" do
+  content_type :json
+
+  payload =
+    begin
+      JSON.parse(request.body.read)
+    rescue JSON::ParserError
+      json_error(400, "invalid json body")
+    end
+
+  name = payload["name"].to_s
+  json_error(400, "invalid project name") unless valid_name?(name)
+
+  full = File.join(PROJECTS_ROOT, name)
+  json_error(409, "project already exists") if File.exist?(full)
+
+  FileUtils.mkdir_p(File.join(full, APP_DIRNAME))
+  File.write(File.join(full, APP_DIRNAME, "app.rb"), "")
+  File.write(File.join(full, BUILD_CONFIG_FILENAME), "")
+
+  { status: "ok", name: name }.to_json
+end
+
 # 指定プロジェクトの編集可能なファイル一覧を返す
 get "/api/files" do
   content_type :json
@@ -167,6 +231,28 @@ get "/api/files" do
   end
 
   relative_paths = files.map { |f| f.sub(root + File::SEPARATOR, "") }.sort
+
+  relative_paths.to_json
+end
+
+# 指定プロジェクトのディレクトリ一覧を返す。GET /api/files はファイルの並びから
+# ツリーを組み立てる都合上、中身が空のディレクトリを表現できない(TreeView側は
+# state[:files]から導出したノードしか描画しないため)。新規フォルダ作成
+# (POST /api/projects/:name/folders)で空のフォルダを作れるようになったことで
+# これが表面化するため、ディレクトリ一覧だけは別に取得できるようにしてある。
+# ドット始まりのディレクトリ(.r2p2-esp32等)は GET /api/files と同じ理由
+# (Dir.globの既定動作)で自動的に除外される。
+get "/api/dirs" do
+  content_type :json
+
+  begin
+    root = project_root(params[:project])
+  rescue ArgumentError
+    json_error(400, "invalid project")
+  end
+
+  dirs = Dir.glob(File.join(root, "**", "*")).select { |f| File.directory?(f) }
+  relative_paths = dirs.map { |f| f.sub(root + File::SEPARATOR, "") }.sort
 
   relative_paths.to_json
 end
@@ -222,6 +308,147 @@ post "/api/file" do
   File.write(full, content)
 
   { status: "ok", path: rel, bytes: content.bytesize }.to_json
+end
+
+# 新規ファイルを作成する(空ファイル)。POST /api/fileは既存ファイルの上書きしか
+# 許可していないので、新規作成はこちらに分けてある。
+post "/api/projects/:name/files" do
+  content_type :json
+
+  root =
+    begin
+      project_root(params[:name])
+    rescue ArgumentError
+      json_error(400, "invalid project")
+    end
+
+  payload =
+    begin
+      JSON.parse(request.body.read)
+    rescue JSON::ParserError
+      json_error(400, "invalid json body")
+    end
+
+  rel = payload["path"].to_s
+  json_error(400, "path is required") if rel.empty?
+  json_error(400, "unsupported file type") unless File.extname(rel) == NEW_FILE_EXTENSION
+  json_error(400, "invalid path") unless valid_relative_path?(rel)
+  json_error(400, "files can only be created under #{APP_DIRNAME}/") unless under_app_dir?(rel)
+
+  full =
+    begin
+      safe_path(root, rel)
+    rescue ArgumentError
+      json_error(400, "invalid path")
+    end
+
+  json_error(409, "file already exists") if File.exist?(full)
+
+  FileUtils.mkdir_p(File.dirname(full))
+  File.write(full, "")
+
+  { status: "ok", path: rel }.to_json
+end
+
+# 新規フォルダを作成する(空ディレクトリ)。新規ファイルと同じくapp/配下のみ許可する。
+post "/api/projects/:name/folders" do
+  content_type :json
+
+  root =
+    begin
+      project_root(params[:name])
+    rescue ArgumentError
+      json_error(400, "invalid project")
+    end
+
+  payload =
+    begin
+      JSON.parse(request.body.read)
+    rescue JSON::ParserError
+      json_error(400, "invalid json body")
+    end
+
+  rel = payload["path"].to_s
+  json_error(400, "path is required") if rel.empty?
+  json_error(400, "invalid path") unless valid_relative_path?(rel)
+  json_error(400, "folders can only be created under #{APP_DIRNAME}/") unless under_app_dir?(rel)
+
+  full =
+    begin
+      safe_path(root, rel)
+    rescue ArgumentError
+      json_error(400, "invalid path")
+    end
+
+  json_error(409, "folder already exists") if File.exist?(full)
+
+  FileUtils.mkdir_p(full)
+
+  { status: "ok", path: rel }.to_json
+end
+
+# ファイルを削除する。ツリーのコンテキストメニュー(「削除」)から呼ばれる。
+# 新規作成とは違いapp/配下に限定しない(mrbgemの.c/.h等、プロジェクト内の
+# ALLOWED_EXTENSIONSファイルであればどこでも削除できる)。
+delete "/api/projects/:name/files" do
+  content_type :json
+
+  root =
+    begin
+      project_root(params[:name])
+    rescue ArgumentError
+      json_error(400, "invalid project")
+    end
+
+  rel = params[:path].to_s
+  json_error(400, "path is required") if rel.empty?
+
+  full =
+    begin
+      safe_path(root, rel)
+    rescue ArgumentError
+      json_error(400, "invalid path")
+    end
+
+  json_error(404, "file not found") unless File.file?(full)
+  json_error(400, "unsupported file type") unless ALLOWED_EXTENSIONS.include?(File.extname(full))
+
+  File.delete(full)
+
+  { status: "ok", path: rel }.to_json
+end
+
+# フォルダを再帰的に削除する。app/自身・mrbgems/自身は構造上必須
+# (app/はR2P2起動スクリプトの置き場所、mrbgems/は「mrbgemを追加」専用の
+# 置き場所)なので削除させない。UIのコンテキストメニューでもこの2つには
+# 「削除」を出していないが、APIを直接叩かれた場合の防御として二重にチェックする。
+delete "/api/projects/:name/folders" do
+  content_type :json
+
+  root =
+    begin
+      project_root(params[:name])
+    rescue ArgumentError
+      json_error(400, "invalid project")
+    end
+
+  rel = params[:path].to_s
+  json_error(400, "path is required") if rel.empty?
+  json_error(400, "invalid path") unless valid_relative_path?(rel)
+  json_error(400, "cannot delete this folder") if rel == APP_DIRNAME || rel == MRBGEMS_DIRNAME
+
+  full =
+    begin
+      safe_path(root, rel)
+    rescue ArgumentError
+      json_error(400, "invalid path")
+    end
+
+  json_error(404, "folder not found") unless File.directory?(full)
+
+  FileUtils.rm_rf(full)
+
+  { status: "ok", path: rel }.to_json
 end
 
 # --- プロジェクト設定(ターゲット・VM・USB Console) ----------------------
@@ -321,6 +548,50 @@ def project_mrbgem_names(root)
   return [] unless Dir.exist?(mrbgems_dir)
 
   Dir.children(mrbgems_dir).select { |name| File.directory?(File.join(mrbgems_dir, name)) }.sort
+end
+
+# 最小構成のmrbgem.rake(mrbgemとして成立する最低限の内容)。
+def mrbgem_rake_content(name)
+  <<~RUBY
+    MRuby::Gem::Specification.new("#{name}") do |spec|
+      spec.license = "MIT"
+      spec.authors = "#{name}"
+      spec.summary = "#{name}"
+    end
+  RUBY
+end
+
+# projects/<project>/mrbgems/以下に新しいmrbgemの雛形(mrbgem.rake・
+# mrblib/<name>.rb)を作る。ここに置くだけで次回ビルドから自動的に
+# 組み込まれる(generated_build_config_content参照。選ぶUIは無い)。
+post "/api/projects/:name/mrbgems" do
+  content_type :json
+
+  root =
+    begin
+      project_root(params[:name])
+    rescue ArgumentError
+      json_error(400, "invalid project")
+    end
+
+  payload =
+    begin
+      JSON.parse(request.body.read)
+    rescue JSON::ParserError
+      json_error(400, "invalid json body")
+    end
+
+  gem_name = payload["name"].to_s
+  json_error(400, "invalid mrbgem name") unless valid_name?(gem_name)
+
+  gem_dir = File.join(root, MRBGEMS_DIRNAME, gem_name)
+  json_error(409, "mrbgem already exists") if File.exist?(gem_dir)
+
+  FileUtils.mkdir_p(File.join(gem_dir, "mrblib"))
+  File.write(File.join(gem_dir, "mrbgem.rake"), mrbgem_rake_content(gem_name))
+  File.write(File.join(gem_dir, "mrblib", "#{gem_name}.rb"), "")
+
+  { status: "ok", name: gem_name }.to_json
 end
 
 def generated_build_config_content(root)
