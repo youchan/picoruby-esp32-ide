@@ -26,3 +26,26 @@ docker build -t picoruby-esp32-ide-builder .
 Open http://localhost:4567 . Projects live under `./projects` by default
 (override with the `PROJECTS_ROOT` env var to use any directory on disk).
 
+## Troubleshooting
+
+### `Failed to execute 'open' on 'SerialPort': Failed to open serial port.`
+
+This happens when connecting to the device from the Terminal tab (Web Serial
+API). On Linux, check `chrome://device-log` right after the failed attempt to
+see the actual OS-level error:
+
+- **`FILE_ERROR_ACCESS_DENIED`**: your user isn't (yet) in the `dialout` group
+  with an active session, so the browser process can't open `/dev/ttyACM*` /
+  `/dev/ttyUSB*`.
+  ```bash
+  sudo usermod -aG dialout $USER
+  ```
+  Adding yourself to the group is not enough by itself — an already-running
+  login session (and any browser already open in it) still has the old group
+  list. **Log out and back in (or reboot)** so the new group membership takes
+  effect, then try connecting again.
+- If the port isn't held by anything and permissions look right but it still
+  fails, check whether another process/service is holding the port open:
+  `sudo lsof /dev/ttyACM0` (or `/dev/ttyUSB0`), and whether `ModemManager` or
+  `brltty` is running and probing it (`systemctl status ModemManager brltty`).
+
